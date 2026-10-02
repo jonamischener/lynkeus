@@ -1,6 +1,6 @@
 {
   "name": "lynkeus-protocol",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Wire contract between an app running lynkeus-agent and whatever drives it.",
   "type": "module",
   "main": "./lib/index.js",
@@ -13,7 +13,8 @@
   },
   "files": [
     "lib",
-    "src"
+    "src",
+    "!**/__tests__"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

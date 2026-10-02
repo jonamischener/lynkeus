@@ -1,6 +1,6 @@
 {
   "name": "lynkeus-headless",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Run a React Native app under jest and React Native Testing Library as a host for lynkeus-agent: same protocol, no simulator.",
   "type": "module",
   "main": "./lib/index.js",
@@ -18,7 +18,7 @@
   "files": [
     "lib",
     "src",
-    "!src/__tests__"
+    "!**/__tests__"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
