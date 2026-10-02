@@ -1,6 +1,6 @@
 {
   "name": "lynkeus-client",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Node driver for apps running lynkeus-agent: attach, read the screen, press, type, wait.",
   "type": "module",
   "main": "./lib/index.js",
@@ -13,7 +13,8 @@
   },
   "files": [
     "lib",
-    "src"
+    "src",
+    "!**/__tests__"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

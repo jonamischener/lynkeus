@@ -1,6 +1,6 @@
 {
   "name": "lynkeus-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "In-app QA agent for React Native: read the screen, drive the app and assert, in milliseconds, from any test runner.",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",

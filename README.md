@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/jonamischener/lynkeus/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/jonamischener/lynkeus/actions/workflows/ci.yml/badge.svg" /></a>
-  <a href="https://www.npmjs.com/package/lynkeus-agent"><img alt="npm" src="https://img.shields.io/npm/v/lynkeus-agent?label=lynkeus-agent" /></a>
+  <a href="https://www.npmjs.com/package/lynkeus"><img alt="npm" src="https://img.shields.io/npm/v/lynkeus" /></a>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   <img alt="React Native 0.76+" src="https://img.shields.io/badge/react--native-0.76%2B-61dafb" />
   <img alt="New Architecture" src="https://img.shields.io/badge/new%20architecture-ready-success" />

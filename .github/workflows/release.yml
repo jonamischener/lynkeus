@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Check the tag matches every package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for p in packages/*/package.json; do
+            v=$(node -p "require('./$p').version")
+            [ "$v" = "$tag" ] || { echo "$p is $v, the tag is $tag"; exit 1; }
+          done
+
+      - name: Build and test
+        run: yarn test
+
+      - name: Pack
+        run: yarn workspaces foreach -A --no-private pack --out "$PWD/dist/%s-%v.tgz"
+
+      - name: Publish
+        run: |
+          npm install -g npm@latest
+          for f in dist/*.tgz; do npm publish "$f" --access public --provenance; done
