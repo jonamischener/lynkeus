@@ -1,0 +1,575 @@
+/**
+ * Runs a case's setup, then its steps, stopping at the first that fails. The
+ * app is driven through the terminal's own commands on one connection; the
+ * backend is prepared and read through the project's fixtures. How this app
+ * logs in or what a user is belongs to the project, as macros and fixtures.
+ */
+import { exec } from 'node:child_process';
+import path from 'node:path';
+import { promisify } from 'node:util';
+
+import type { Element, Screen, Target, TraceEvent } from 'lynkeus-protocol';
+
+import { describeScreen } from '../device/driver.js';
+import { type AppEvent, normalizeEvents, type RunEvent } from '../knowledge/events.js';
+import { type Base, type Command, find } from '../registry.js';
+import { execute } from '../runtime.js';
+import { isRoute, parseTarget, scopedTarget } from '../targets.js';
+import type { Fixtures, FixturesConfig } from './fixtures.js';
+import { type Case, dig, interpolate, matcherOf, matches, type Scope, type Step, stepOf, type StepValue } from './format.js';
+
+export type CasesConfig = {
+  /** The folder of the file that declared this, set when the configuration is read. */
+  base?: string;
+  /** Where cases live (default `cases`). */
+  dir?: string;
+  /** Where the flows a case runs live (default `flows`). */
+  flows?: string;
+  /** The long-lived command that answers fixture steps, as JSON lines. */
+  fixtures?: FixturesConfig;
+  /** The fixture `assert` reads the backend through (default `inspect`). */
+  inspect?: string;
+  /** `{ "user": "user_id" }` turns `user: u` into `user_id: <u.user_id>`, and gives a step that names no user the latest one. */
+  refs?: Record<string, string>;
+  /** Steps this project adds: `{ "app.login": [...] }`. Inside, `{{param.x}}` is what the case passed. */
+  macros?: Record<string, unknown[]>;
+  /** What the app may put in the way of a step and the steps that get past it; a step whose own words match `unless` is about it, and is left alone. */
+  interruptions?: { see: string; do: unknown[]; unless?: string }[];
+};
+
+export type StepReport = { step: string; status: 'passed' | 'failed' | 'skipped'; ms: number; error?: string };
+export type CaseReport = {
+  id: string;
+  title?: string;
+  file: string;
+  result: 'passed' | 'failed';
+  ms: number;
+  steps: StepReport[];
+  /** When a step failed: the screen, the requests since the mark, and why. */
+  evidence?: { screen?: string; requests?: string[]; why?: string };
+  /** What the app told its analytics, each with the step that caused it, when the run asked for it. */
+  events?: RunEvent[];
+};
+
+export type RunOptions = { base: Base; config: CasesConfig; fixtures?: Fixtures; dry?: boolean; events?: boolean; log?: (line: string) => void };
+
+/** What a buffer holds that it did not before, whichever end it grows from. */
+export const newSince = (before: AppEvent[], now: AppEvent[]): AppEvent[] => {
+  if (now.length < before.length) return now;
+  if (now.length === before.length) return [];
+  const same = (a: AppEvent[], b: AppEvent[]) => JSON.stringify(a) === JSON.stringify(b);
+  const extra = now.length - before.length;
+  if (same(now.slice(0, before.length), before)) return now.slice(before.length);
+  if (same(now.slice(extra), before)) return now.slice(0, extra).reverse();
+  return now;
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const run = promisify(exec);
+
+const label = (step: Step): string => {
+  const value = step.value;
+  if (value === null || value === undefined) return step.verb;
+  const text =
+    typeof value === 'object'
+      ? Object.entries(value)
+          .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+          .join(', ')
+      : String(value);
+  return `${step.verb} ${text}`.slice(0, 140);
+};
+
+const FLAG_NAMES: Record<string, string> = {
+  within: 'in',
+  advanceMs: 'advance',
+  timeoutMs: 'timeout',
+  delayMs: 'delay',
+  durationMs: 'duration',
+  holdMs: 'hold',
+};
+
+/** `wait` holds when the case passed it; `method=phone` when it passed that value. */
+const holds = (condition: string, param: Record<string, unknown>, ran: Set<string> = new Set()): boolean => {
+  if (condition.startsWith('ran:')) return ran.has(condition.slice(4));
+  const [name, value] = condition.split('=', 2);
+  const given = param[name!];
+  if (value !== undefined) return String(given) === value;
+  return given !== undefined && given !== null && given !== false && given !== 'none';
+};
+
+/** A step's value as the argv of the command it names: what matches a positional by name goes in place, the rest are flags. */
+export const argvFor = (command: Command, value: StepValue): string[] => {
+  const argv = command.name.split(' ');
+  if (value === null || value === undefined) return argv;
+  if (typeof value === 'string' && command.flags?.[value]?.type === 'boolean') return [...argv, `--${value}`];
+  if (typeof value !== 'object' || Array.isArray(value)) return [...argv, ...(Array.isArray(value) ? value.map(String) : [String(value)])];
+  const given = { ...(value as Record<string, unknown>) };
+  const positionals = command.positionals ?? [];
+  // A case says `target` or `request` where a command may call its first argument something else.
+  const first = positionals[0]?.name;
+  for (const alias of ['target', 'request', 'route', 'url', 'state', 'text']) {
+    if (first && !(first in given) && alias in given && !positionals.some((p) => p.name === alias) && !(alias in (command.flags ?? {}))) {
+      given[first] = given[alias];
+      delete given[alias];
+      break;
+    }
+  }
+  for (const p of positionals) {
+    if (!(p.name in given)) {
+      if (positionals.slice(positionals.indexOf(p) + 1).some((later) => later.name in given)) throw new Error(`${command.name} needs ${p.name}`);
+      break;
+    }
+    const v = given[p.name];
+    argv.push(typeof v === 'object' ? JSON.stringify(v) : String(v));
+    delete given[p.name];
+  }
+  for (const [key, v] of Object.entries(given)) {
+    const flag = FLAG_NAMES[key] ?? key;
+    if (!(flag in (command.flags ?? {}))) throw new Error(`${command.name} has no ${key}`);
+    if (v === false || v === undefined || v === null) continue;
+    if (v === true) argv.push(`--${flag}`);
+    else if (Array.isArray(v)) for (const item of v) argv.push(`--${flag}`, String(item));
+    else argv.push(`--${flag}`, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  }
+  return argv;
+};
+
+const presented = (screen: Screen): Element[] => screen.elements.filter((e) => !e.hidden || e.hidden === 'inert');
+const textOf = (e: Element) => e.text ?? e.value ?? e.accessibilityLabel ?? '';
+
+const requestMatches = (event: TraceEvent, wanted: string, status?: number): boolean => {
+  if (event.kind !== 'request') return false;
+  const [method, route] = wanted.includes(' ') ? wanted.split(/\s+/, 2) : ['*', wanted];
+  let pathname = event.url;
+  try {
+    pathname = new URL(event.url).pathname;
+  } catch {
+    pathname = event.url.split('?')[0]!;
+  }
+  if (method !== '*' && event.method.toUpperCase() !== method!.toUpperCase()) return false;
+  if (!pathname.endsWith(route!)) return false;
+  return status === undefined ? true : event.status === status;
+};
+
+const BUILT_IN = ['press', 'type', 'swipe', 'see', 'requests', 'wait', 'nav', 'call', 'run', 'events', 'event'];
+
+const unknownStep = (step: Step, config: CasesConfig): string | undefined => {
+  if (config.macros?.[step.verb] || !step.verb.startsWith('app.')) return undefined;
+  const name = step.verb.slice(4);
+  if (BUILT_IN.includes(name)) return undefined;
+  const command = find(name) ?? find(`os ${name}`);
+  if (!command) return `${step.verb} is not a step: lynkeus has no command ${name}, and the project declares no macro for it`;
+  try {
+    argvFor(command, step.value);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  return undefined;
+};
+
+export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport> => {
+  const { base, config } = options;
+  const log = options.log ?? (() => undefined);
+  const scope: Scope = {};
+  const ran = new Set<string>();
+  const latest: Record<string, unknown> = {};
+  const started = Date.now();
+  const steps: StepReport[] = [];
+  let mark: number | undefined;
+  let why: string | undefined;
+  const recorded: RunEvent[] = [];
+  let buffer: AppEvent[] = [];
+  // Read, never emptied: a case may be asserting on the buffer.
+  const collect = async (index: number) => {
+    if (!options.events) return;
+    const d = await base.device().catch(() => undefined);
+    if (!d?.server.connected) return;
+    const now = normalizeEvents(await d.command('events').catch(() => []));
+    const route = (await d.screen().catch(() => undefined))?.route;
+    for (const e of newSince(buffer, now)) recorded.push({ ...e, step: index, route });
+    buffer = now;
+  };
+
+  const device = () => base.device();
+  const sinceMark = async (): Promise<TraceEvent[]> => (await (await device()).trace(mark)).events;
+  const cli = async (argv: string[]) => {
+    const outcome = await execute(argv, base);
+    if (outcome.error || outcome.code !== 0) {
+      why = outcome.why;
+      throw new Error(outcome.error || outcome.text || `${argv.join(' ')} failed`);
+    }
+    return outcome;
+  };
+
+  const withRefs = (params: Record<string, unknown>): Record<string, unknown> => {
+    const out = { ...params };
+    for (const [param, field] of Object.entries(config.refs ?? {})) {
+      const alias = out[param];
+      delete out[param];
+      if (typeof alias === 'string') {
+        if (!(alias in scope)) throw new Error(`no alias '${alias}'`);
+        const found = dig(scope[alias], field);
+        if (found === undefined) throw new Error(`alias '${alias}' has no ${field}`);
+        out[field] = found;
+      } else if (!(field in out) && latest[field] !== undefined) out[field] = latest[field];
+    }
+    return out;
+  };
+
+  const fixture = async (name: string, value: StepValue): Promise<void> => {
+    if (!options.fixtures) throw new Error(`${name} is not a step lynkeus has, and the project declares no fixtures (cases.fixtures in lynkeus.config.json)`);
+    const given = value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+    const as = typeof given.as === 'string' ? given.as : undefined;
+    delete given.as;
+    const answer = await options.fixtures.call(name, withRefs(given));
+    if (as) scope[as] = answer;
+    for (const field of Object.values(config.refs ?? {})) if (answer[field] !== undefined) latest[field] = answer[field];
+  };
+
+  const assert = async (value: StepValue): Promise<void> => {
+    const params = (value ?? {}) as Record<string, unknown>;
+    const matcher = matcherOf(params);
+    if (!matcher || typeof params.path !== 'string') throw new Error('assert needs a path and a matcher (equals, includes, gte, …)');
+    if (!options.fixtures) throw new Error('assert reads the backend through fixtures, and the project declares none');
+    const rest = Object.fromEntries(Object.entries(params).filter(([k]) => k !== 'path' && !(k in matcher)));
+    const answer = await options.fixtures.call(config.inspect ?? 'inspect', withRefs(rest));
+    const got = dig(answer, params.path);
+    if (!matches(got, matcher)) throw new Error(`${params.path} is ${JSON.stringify(got)}`);
+  };
+
+  const targetIn = (params: Record<string, unknown>): Target | undefined => {
+    const raw = typeof params.target === 'string' ? params.target : params.testId ? `#${String(params.testId)}` : undefined;
+    return raw === undefined ? undefined : scopedTarget(raw, { in: params.within, nth: params.nth });
+  };
+
+  /** Every condition a `see` names, read off one screen and the trace since the mark; what is missing, or nothing. */
+  const seen = async (params: Record<string, unknown>): Promise<string | undefined> => {
+    const d = await device();
+    const screen = await d.screen();
+    const elements = presented(screen);
+    if (typeof params.route === 'string' && screen.route !== params.route) return `on ${screen.route ?? 'no route'}, not ${params.route}`;
+    if ('layer' in params) {
+      const open = screen.presenting;
+      const wanted = params.layer;
+      const ok = wanted === true ? !!open : wanted === false ? !open : !!open && `${open.testId ?? ''}`.includes(String(wanted));
+      if (!ok) return wanted === false ? 'a layer is open' : `no layer${wanted === true ? '' : ` ${String(wanted)}`} is open`;
+    }
+    const target = targetIn(params);
+    const text = typeof params.text === 'string' ? params.text : undefined;
+    if (target) {
+      const found = (await d.server.call('find', target)) as Element | null;
+      if (!found || (found.hidden && found.hidden !== 'inert')) return `not on screen: ${JSON.stringify(target)}`;
+      if (text !== undefined && !textOf(found).includes(text) && !elements.some((e) => e.parent === found.i && textOf(e).includes(text))) {
+        return `${JSON.stringify(target)} says ${JSON.stringify(textOf(found))}, not ${JSON.stringify(text)}`;
+      }
+    } else if (text !== undefined && !elements.some((e) => textOf(e).includes(text))) return `not on screen: ${JSON.stringify(text)}`;
+    if (typeof params.request === 'string') {
+      const status = typeof params.status === 'number' ? params.status : undefined;
+      if (!(await sinceMark()).some((e) => requestMatches(e, params.request as string, status))) return `not requested since the mark: ${params.request}`;
+    }
+    if (typeof params.event === 'string') {
+      const wanted = (params.props ?? params.properties ?? {}) as Record<string, unknown>;
+      const events = normalizeEvents(await d.command('events'));
+      const hit = events.some((e) => e.name === params.event && Object.entries(wanted).every(([k, v]) => String(e.props?.[k]) === String(v)));
+      if (!hit) return `no ${params.event} event${Object.keys(wanted).length ? ` with ${JSON.stringify(wanted)}` : ''}`;
+    }
+    return undefined;
+  };
+
+  const see = async (value: StepValue): Promise<void> => {
+    const params = typeof value === 'string' ? { target: value } : ((value ?? {}) as Record<string, unknown>);
+    const absent = params.absent === true;
+    const wait = typeof params.timeoutMs === 'number' ? params.timeoutMs : 3000;
+    const deadline = Date.now() + wait;
+    const hard = Date.now() + Math.max(wait, 12_000);
+    while (true) {
+      await interrupted(value);
+      const missing = await seen(params);
+      if (absent ? missing !== undefined : missing === undefined) return;
+      if (Date.now() > deadline && Date.now() < hard && (await (await device()).screen()).busy) {
+        await sleep(150);
+        continue;
+      }
+      if (Date.now() > deadline)
+        throw new Error(absent ? `still there: ${label({ verb: '', value: { ...params, absent: undefined } as StepValue }).trim()}` : missing!);
+      await sleep(150);
+    }
+  };
+
+  const waitForRequest = async (params: Record<string, unknown>): Promise<void> => {
+    const timeoutMs = typeof params.timeoutMs === 'number' ? params.timeoutMs : 10_000;
+    const deadline = Date.now() + timeoutMs;
+    const status = typeof params.status === 'number' ? params.status : undefined;
+    while (true) {
+      const events = await sinceMark();
+      const hit = events.some(
+        (e) => requestMatches(e, String(params.request), status) && (status !== undefined || (e.kind === 'request' && String(e.status).startsWith('2'))),
+      );
+      if (hit) return;
+      if (Date.now() > deadline) throw new Error(`no ${status ?? '2xx'} ${String(params.request)} within ${timeoutMs} ms`);
+      await sleep(300);
+    }
+  };
+
+  const press = async (value: StepValue): Promise<'skipped' | undefined> => {
+    const params = typeof value === 'string' ? { target: value } : ((value ?? {}) as Record<string, unknown>);
+    const target = targetIn(params);
+    if (!target) throw new Error('app.press needs a target');
+    const d = await device();
+    if (params.optional === true) {
+      const there = await d.waitFor({ target, timeoutMs: 300 }).then(
+        () => true,
+        () => false,
+      );
+      if (!there) return 'skipped';
+    }
+    // The control may still be arriving, or disabled while what it depends on loads.
+    const deadline = Date.now() + (typeof params.timeoutMs === 'number' ? params.timeoutMs : 3000);
+    const hard = Date.now() + 15_000;
+    while (Date.now() < hard && 'testId' in target) {
+      const found = (await d.server.call('find', target)) as Element | null;
+      if (found?.enabled) break;
+      if (Date.now() > deadline && !(await d.screen()).busy) break;
+      await sleep(200);
+    }
+    const { optional: _optional, timeoutMs: _timeout, ...rest } = params;
+    await cli(argvFor(find('press')!, rest as StepValue));
+    return undefined;
+  };
+
+  const call = async (params: Record<string, unknown> | undefined): Promise<void> => {
+    if (!params?.command) throw new Error('app.call needs a command');
+    const d = await device();
+    const deadline = Date.now() + (typeof params.timeoutMs === 'number' ? params.timeoutMs : 3000);
+    const expect = (params.expect ?? {}) as Record<string, unknown>;
+    for (;;) {
+      const answer = await d.command(String(params.command), params.params);
+      if (typeof params.as === 'string') scope[params.as] = answer;
+      const miss = Object.entries(expect).find(([p, wanted]) => {
+        const got = dig(answer, p);
+        return wanted === null ? got !== undefined && got !== null : String(got) !== String(wanted);
+      });
+      if (!miss) return;
+      if (Date.now() > deadline)
+        throw new Error(`${String(params.command)}: ${miss[0]} is ${JSON.stringify(dig(answer, miss[0]))}, expected ${JSON.stringify(miss[1])}`);
+      await sleep(250);
+    }
+  };
+
+  // Nobody acts on a screen that is still asking for what it shows: a press
+  // that lands before the data does is a different case from the one written.
+  const ready = async () => {
+    const d = await device();
+    const deadline = Date.now() + 5000;
+    while ((await d.screen()).busy && Date.now() < deadline) await sleep(100);
+  };
+
+  let handling = false;
+  const interrupted = async (value: StepValue): Promise<void> => {
+    if (handling || !config.interruptions?.length) return;
+    const d = await device();
+    const about = JSON.stringify(value ?? '');
+    for (const one of config.interruptions) {
+      if (one.unless && new RegExp(one.unless, 'i').test(about)) continue;
+      const target = parseTarget(one.see);
+      const found = (await d.server.call('find', target).catch(() => null)) as Element | null;
+      if (!found || found.hidden) continue;
+      handling = true;
+      try {
+        for (const raw of one.do) await perform(stepOf(raw));
+      } catch (error) {
+        const still = (await d.server.call('find', target).catch(() => null)) as Element | null;
+        if (still && !still.hidden) throw error;
+      } finally {
+        handling = false;
+      }
+    }
+  };
+
+  const app = async (name: string, value: StepValue): Promise<'skipped' | undefined> => {
+    const params = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+    const d = await device();
+    mark ??= (await d.trace()).last;
+    switch (name) {
+      case 'press': {
+        await interrupted(value);
+        await ready();
+        const outcome = await press(value);
+        // One touch, one render: the next step reads what this one caused.
+        await d.idle({ quietMs: 50, timeoutMs: 400 }).catch(() => undefined);
+        return outcome;
+      }
+      case 'type':
+      case 'swipe':
+        await interrupted(value);
+        await ready();
+        await cli(argvFor(find(name)!, value));
+        // A pager on a device keeps moving after the finger lifts, and swallows a swipe sent into that momentum.
+        if (name === 'swipe' && d.server.hello?.native) await d.idle({ quietMs: 700, timeoutMs: 8000 }).catch(() => undefined);
+        return undefined;
+      case 'see':
+        await see(value);
+        return undefined;
+      case 'requests':
+        mark = (await d.trace()).last;
+        return undefined;
+      case 'wait': {
+        if (typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value))) await sleep(Number(value));
+        else if (params?.request) await waitForRequest(params);
+        else {
+          if (config.interruptions?.length) {
+            const asked: Record<string, unknown> = typeof value === 'string' ? { what: value } : { ...(params ?? {}) };
+            const deadline = Date.now() + (typeof asked.timeoutMs === 'number' ? asked.timeoutMs : 10_000);
+            for (;;) {
+              await interrupted(value);
+              const left = deadline - Date.now();
+              const outcome = await execute(argvFor(find('wait')!, { ...asked, timeoutMs: Math.max(Math.min(left, 1000), 100) } as StepValue), base);
+              if (!outcome.error && outcome.code === 0) break;
+              if (Date.now() >= deadline) {
+                why = outcome.why;
+                throw new Error(outcome.error ?? outcome.text ?? 'wait failed');
+              }
+            }
+          } else await cli(argvFor(find('wait')!, value));
+          // A screen that just arrived on a device is still sliding in, which no render shows: a press then lands on the one it left.
+          const what = typeof value === 'string' ? value : String(params?.what ?? '');
+          if (d.server.hello?.native && isRoute(what)) await d.idle({ quietMs: 700, timeoutMs: 8000 }).catch(() => undefined);
+        }
+        return undefined;
+      }
+      case 'nav': {
+        const route = typeof value === 'string' ? value : String(params?.route);
+        await cli(argvFor(find('nav')!, value));
+        await d.waitFor({ route, timeoutMs: 8000 });
+        await d.idle({ quietMs: 300, timeoutMs: 8000 });
+        return undefined;
+      }
+      case 'call':
+        await call(params);
+        return undefined;
+      case 'run': {
+        const flow = typeof value === 'string' ? value : String(params?.flow);
+        const file = path.isAbsolute(flow) ? flow : path.resolve(config.base ?? base.root, config.flows ?? 'flows', flow);
+        const vars = Object.entries((params?.vars ?? {}) as Record<string, unknown>).flatMap(([k, v]) => ['--var', `${k}=${String(v)}`]);
+        await cli(['run', file, ...vars]);
+        return undefined;
+      }
+      case 'events':
+        await collect(steps.length + 1);
+        await d.command('events', { clear: true });
+        buffer = [];
+        return undefined;
+      case 'event':
+        await see({ ...(params ?? {}), event: typeof value === 'string' ? value : params?.name, name: undefined } as StepValue);
+        return undefined;
+      default: {
+        const command = find(name) ?? find(`os ${name}`);
+        if (!command) throw new Error(`app.${name} is not a step: lynkeus has no command ${name}, and the project declares no macro for it`);
+        await cli(argvFor(command, value));
+        return undefined;
+      }
+    }
+  };
+
+  const shell = async (value: StepValue): Promise<void> => {
+    const params = typeof value === 'string' ? { run: value } : ((value ?? {}) as Record<string, unknown>);
+    const { stdout } = await run(String(params.run), { cwd: config.base ?? base.root, env: process.env, timeout: 120_000 });
+    if (typeof params.as !== 'string') return;
+    const json = /\{[\s\S]*\}/.exec(stdout)?.[0];
+    scope[params.as] = json ? JSON.parse(json) : { out: stdout.trim() };
+  };
+
+  const macro = async (steps: unknown[], value: StepValue): Promise<void> => {
+    const given = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : { value };
+    // A parameter that names an alias is that alias: `as: u` makes `{{param.as.user_id}}` the user's.
+    const param = Object.fromEntries(Object.entries(given).map(([k, v]) => [k, typeof v === 'string' && v in scope ? scope[v] : v]));
+    const outer = scope.param;
+    scope.param = param;
+    try {
+      for (const raw of steps) {
+        const entry = raw as Record<string, unknown>;
+        if ('do' in entry) {
+          const all = (v: unknown) => (Array.isArray(v) ? v : [v]).map(String);
+          if ('when' in entry && !all(entry.when).every((c) => holds(c, param, ran))) continue;
+          if ('unless' in entry && all(entry.unless).some((c) => holds(c, param, ran))) continue;
+          if ('on' in entry && !(await runsHere(String(entry.on)))) continue;
+          await perform(stepOf(entry.do));
+        } else await perform(stepOf(entry));
+      }
+    } finally {
+      scope.param = outer;
+    }
+  };
+
+  const runsHere = async (on: string): Promise<boolean> => {
+    const hello = (await device()).server.hello;
+    const native = !!hello?.native;
+    if (on === 'device') return native;
+    if (on === 'headless') return !native;
+    return hello?.platform === on;
+  };
+
+  const perform = async (step: Step): Promise<'skipped' | undefined> => {
+    if (step.on && !(await runsHere(step.on))) return 'skipped';
+    ran.add(step.verb);
+    const value = interpolate(step.value, scope);
+    const custom = config.macros?.[step.verb];
+    if (custom) {
+      await macro(custom, value);
+      return undefined;
+    }
+    if (step.verb.startsWith('app.')) return app(step.verb.slice(4), value);
+    if (step.verb === 'assert') return void (await assert(value));
+    if (step.verb === 'exec') return void (await shell(value));
+    return void (await fixture(step.verb, value));
+  };
+
+  if (options.events && !options.dry) {
+    const d = await base.device().catch(() => undefined);
+    if (d?.server.connected) buffer = normalizeEvents(await d.command('events').catch(() => []));
+  }
+
+  let failed = false;
+  for (const step of [...c.setup, ...c.steps]) {
+    const text = label(step);
+    if (failed) {
+      steps.push({ step: text, status: 'skipped', ms: 0 });
+      continue;
+    }
+    if (options.dry) {
+      const unknown = unknownStep(step, config);
+      steps.push({ step: text, status: unknown ? 'failed' : 'passed', ms: 0, ...(unknown ? { error: unknown } : {}) });
+      if (unknown) log(`  ❌ ${text}  — ${unknown}`);
+      continue;
+    }
+    const t0 = Date.now();
+    try {
+      const outcome = await perform(step);
+      if (step.verb.startsWith('app.') || config.macros?.[step.verb]) await collect(steps.length + 1);
+      steps.push({ step: text, status: outcome === 'skipped' ? 'skipped' : 'passed', ms: Date.now() - t0 });
+      log(`  ${outcome === 'skipped' ? '⏭️' : '✅'} ${text}  (${Date.now() - t0}ms)`);
+    } catch (error) {
+      failed = true;
+      const message = error instanceof Error ? error.message : String(error);
+      steps.push({ step: text, status: 'failed', ms: Date.now() - t0, error: message });
+      log(`  ❌ ${text}  — ${message.split('\n')[0]}  (${Date.now() - t0}ms)`);
+    }
+  }
+
+  if (options.dry) failed = steps.some((s) => s.status === 'failed');
+  const report: CaseReport = { id: c.id, title: c.title, file: c.file, result: failed ? 'failed' : 'passed', ms: Date.now() - started, steps };
+  if (options.events) report.events = recorded;
+  if (failed && !options.dry) {
+    const d = await device().catch(() => undefined);
+    if (d?.server.connected) {
+      const screen = await d.screen().catch(() => undefined);
+      const events = await d.trace(mark).catch(() => undefined);
+      report.evidence = {
+        screen: screen ? describeScreen(screen, { limit: 40 }) : undefined,
+        requests: events?.events.flatMap((e) => (e.kind === 'request' ? [`${e.status ?? '…'} ${e.method} ${e.url}`] : [])).slice(-8),
+        why,
+      };
+    }
+  }
+  return report;
+};

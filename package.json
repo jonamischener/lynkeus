@@ -1,0 +1,21 @@
+{
+  "name": "lynkeus-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "example"
+  ],
+  "scripts": {
+    "lint": "biome check .",
+    "typecheck": "yarn build && yarn workspaces foreach -A --no-private run typecheck",
+    "test": "yarn build && yarn workspaces foreach -A --no-private run test",
+    "build": "yarn workspaces foreach -A --topological-dev --no-private run build",
+    "prepare": "yarn build",
+    "example": "yarn workspace lynkeus-example"
+  },
+  "packageManager": "yarn@4.11.0",
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "turbo": "^2.10.8"
+  }
+}

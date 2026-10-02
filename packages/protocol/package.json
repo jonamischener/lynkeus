@@ -1,0 +1,35 @@
+{
+  "name": "lynkeus-protocol",
+  "version": "0.2.0",
+  "description": "Wire contract between an app running lynkeus-agent and whatever drives it.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/__tests__/*.test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jonamischener/lynkeus.git",
+    "directory": "packages/protocol"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3"
+  },
+  "homepage": "https://github.com/jonamischener/lynkeus#readme"
+}

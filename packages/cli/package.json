@@ -1,0 +1,47 @@
+{
+  "name": "lynkeus",
+  "version": "0.2.0",
+  "description": "Drive a React Native app running lynkeus-agent from the terminal, a test runner or an MCP client: screens, flows, smoke, crawl, and the app's screen graph.",
+  "type": "module",
+  "bin": "./lib/cli.js",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/__tests__/*.test.ts src/knowledge/__tests__/*.test.ts src/cases/__tests__/*.test.ts",
+    "dev": "tsx src/cli.ts",
+    "docs": "node lib/cli.js help --markdown > ../../docs/COMMANDS.md"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jonamischener/lynkeus.git",
+    "directory": "packages/cli"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "lynkeus-client": "workspace:^",
+    "lynkeus-protocol": "workspace:^",
+    "pngjs": "^7.0.0",
+    "ts-morph": "^24.0.0",
+    "yaml": "^2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pngjs": "^6.0.5",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3"
+  },
+  "homepage": "https://github.com/jonamischener/lynkeus#readme"
+}

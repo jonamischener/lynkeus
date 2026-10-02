@@ -1,0 +1,40 @@
+{
+  "name": "lynkeus-client",
+  "version": "0.2.0",
+  "description": "Node driver for apps running lynkeus-agent: attach, read the screen, press, type, wait.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/__tests__/*.test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jonamischener/lynkeus.git",
+    "directory": "packages/client"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "lynkeus-protocol": "workspace:^",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3"
+  },
+  "homepage": "https://github.com/jonamischener/lynkeus#readme"
+}
