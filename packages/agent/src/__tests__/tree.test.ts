@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 
 import { Dimensions } from 'react-native';
 
-import { snapshotElements } from '../tree';
+import type { Element } from '../protocol';
+import { moveToViews, snapshotElements } from '../tree';
 
 type FakeFiber = {
   tag: number;
@@ -207,5 +208,29 @@ describe('snapshotElements', () => {
     expect(byId['other-tab']?.hidden).toBe('a11y');
     expect(byId['page-3']?.hidden).toBe('inert');
     expect(byId['on-tab']?.hidden).toBeUndefined();
+  });
+});
+
+describe('moveToViews', () => {
+  const element = (i: number, y: number, extra: Partial<Element> = {}): Element => ({
+    i,
+    kind: 'view',
+    frame: { x: 10, y, w: 100, h: 40 },
+    enabled: true,
+    depth: 0,
+    ...extra,
+  });
+
+  it('puts an element where its view stands', () => {
+    const elements = [element(0, 96, { tag: 7 })];
+    moveToViews(elements, () => [12, 150, 100, 44]);
+    expect(elements[0]?.frame).toEqual({ x: 12, y: 150, w: 100, h: 44 });
+  });
+
+  it('moves an element with no view by what its ancestor moved', () => {
+    const elements = [element(0, 96, { tag: 7 }), element(1, 110, { parent: 0 }), element(2, 300)];
+    moveToViews(elements, (tag) => (tag === 7 ? [10, 150, 100, 40] : null));
+    expect(elements[1]?.frame.y).toBe(164);
+    expect(elements[2]?.frame.y).toBe(300);
   });
 });

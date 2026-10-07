@@ -26,6 +26,12 @@ export interface Spec extends TurboModule {
    * Returned as JSON (`number[][]`): codegen has no nested array type.
    */
   hitTest(xs: number[], ys: number[]): string;
+  /**
+   * Where each tag's native view stands in the window, in points, as JSON
+   * (`([x, y, width, height] | null)[]`, null for a tag with no view). Android
+   * answers; iOS returns `[]`, where the shadow tree already agrees with the views.
+   */
+  frames(tags: number[]): string;
 }
 
 export default TurboModuleRegistry.get<Spec>('Lynkeus');

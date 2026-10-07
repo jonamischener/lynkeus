@@ -1,4 +1,4 @@
-import { Dimensions, TextInput } from 'react-native';
+import { Dimensions, Platform, TextInput } from 'react-native';
 
 import { centre, type Snapshot } from './backend';
 import { kindOf, SCREEN_CONTAINERS } from './hosts';
@@ -134,6 +134,43 @@ const markCovered = (elements: Element[]): void => {
   });
 };
 
+/**
+ * Moves each element to where its native view stands. An element with no view
+ * of its own (flattened away) moves by what its nearest listed ancestor moved.
+ */
+export const moveToViews = (elements: Element[], frameOf: (tag: number) => number[] | null | undefined): void => {
+  const moved = new Map<number, { dx: number; dy: number }>();
+  for (const e of elements) {
+    const frame = e.tag === undefined ? undefined : frameOf(e.tag);
+    if (!frame) continue;
+    const [x = 0, y = 0, w = 0, h = 0] = frame;
+    moved.set(e.i, { dx: x - e.frame.x, dy: y - e.frame.y });
+    e.frame = { x, y, w, h };
+  }
+  for (const e of elements) {
+    if (moved.has(e.i)) continue;
+    for (let parent = e.parent; parent !== undefined; parent = elements[parent]?.parent) {
+      const by = moved.get(parent);
+      if (by) {
+        e.frame = { ...e.frame, x: e.frame.x + by.dx, y: e.frame.y + by.dy };
+        break;
+      }
+    }
+  }
+};
+
+// On Android a view can stand somewhere other than where the shadow tree puts
+// it (a status bar lower, in an app that draws under it), and a touch goes to
+// where the view is.
+const placeAsViews = (elements: Element[]): void => {
+  if (Platform.OS !== 'android') return;
+  const tags = elements.flatMap((e) => (e.tag === undefined ? [] : [e.tag]));
+  const frames = touch.frames(tags);
+  if (!frames) return;
+  const byTag = new Map(tags.map((tag, index) => [tag, frames[index]]));
+  moveToViews(elements, (tag) => byTag.get(tag));
+};
+
 type Walk = {
   depth: number;
   inButton: boolean;
@@ -241,6 +278,7 @@ export const snapshotElements = (): Snapshot => {
   for (const root of rootFibers()) {
     walkChildren(root, { depth: 0, inButton: false, rootAttached: true });
   }
+  placeAsViews(elements);
   const presenting = resolvePresentation(elements, layers);
   markCovered(elements);
   return { elements, presenting };

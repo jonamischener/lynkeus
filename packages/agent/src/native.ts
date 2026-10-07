@@ -20,6 +20,13 @@ export const touch = {
   dismissKeyboard: () => ready().dismissKeyboard(),
   submitEditing: () => ready().submitEditing(),
   /** For each point, the tags of the view a touch there reaches and its ancestors; null without the native module. */
+  /** Where each tag's native view stands in the window, null for a tag without one; null when the native side does not say. */
+  frames: (tags: number[]): (number[] | null)[] | null => {
+    // A build made before the native side learned this has no such method.
+    if (!available() || tags.length === 0 || typeof ready().frames !== 'function') return null;
+    const frames = JSON.parse(ready().frames(tags)) as (number[] | null)[];
+    return frames.length === tags.length ? frames : null;
+  },
   hitTest: (points: { x: number; y: number }[]): number[][] | null => {
     if (!available()) return null;
     const json = ready().hitTest(

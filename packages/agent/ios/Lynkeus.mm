@@ -250,6 +250,12 @@ static id<UIKeyInput> QaKeyInput(void) {
 #endif
 }
 
+// The shadow tree and the views agree on iOS, so there is nothing to correct.
+- (NSString *)frames:(NSArray *)tags
+{
+  return @"[]";
+}
+
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
     (const facebook::react::ObjCTurboModule::InitParams &)params
 {
