@@ -14,6 +14,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReadableArray
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Touch and key synthesis dispatched to the activity's own window: no
@@ -134,6 +135,35 @@ class LynkeusModule(reactContext: ReactApplicationContext) :
       chains.put(chain)
     }
     return chains.toString()
+  }
+
+  private fun collect(view: View, wanted: Set<Int>, found: MutableMap<Int, View>) {
+    if (view.id in wanted) found[view.id] = view
+    if (view is ViewGroup) for (i in 0 until view.childCount) collect(view.getChildAt(i), wanted, found)
+  }
+
+  // Where each tag's view stands: [x, y, width, height] in points from the
+  // window's corner, null for a tag with no view. Read like hitTest, on
+  // whichever thread asks.
+  override fun frames(tags: ReadableArray): String {
+    if (!debuggable) return "[]"
+    val wanted = HashSet<Int>()
+    for (i in 0 until tags.size()) wanted.add(tags.getDouble(i).toInt())
+    val found = HashMap<Int, View>()
+    rootView()?.let { collect(it, wanted, found) }
+    val density = reactApplicationContext.resources.displayMetrics.density.toDouble()
+    val frames = JSONArray()
+    val location = IntArray(2)
+    for (i in 0 until tags.size()) {
+      val view = found[tags.getDouble(i).toInt()]
+      if (view == null) {
+        frames.put(JSONObject.NULL)
+      } else {
+        view.getLocationInWindow(location)
+        frames.put(JSONArray(listOf(location[0] / density, location[1] / density, view.width / density, view.height / density)))
+      }
+    }
+    return frames.toString()
   }
 
   // The deepest visible view containing the point, in window coordinates.
