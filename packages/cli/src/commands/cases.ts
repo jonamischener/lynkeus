@@ -8,6 +8,7 @@ import { type CaseReport, runCase } from '../cases/runner.js';
 import { CONFIG, EXAMPLE_CASE, FIXTURES, FORMAT } from '../cases/templates.js';
 import { configFile } from '../config.js';
 import { readJson, writeJson } from '../files.js';
+import { RunFile } from '../cases/runfile.js';
 import { eventsFile } from '../knowledge/events.js';
 import { define } from '../registry.js';
 
@@ -72,6 +73,7 @@ export const caseCommands = [
       once: { type: 'boolean', help: 'no second chance for a case that fails' },
       report: { type: 'string', help: 'append one JSON line per case', value: 'file' },
       events: { type: 'string', help: 'keep what the app told its analytics, per case, as <dir>/<case id>/events.jsonl', value: 'dir' },
+      out: { type: 'string', help: 'write the run as a directory a report can read: run.json and cases.jsonl, a line per attempt', value: 'dir' },
       'dry-run': { type: 'boolean', help: 'parse and list the steps without running them' },
     },
     needs: 'nothing',
@@ -93,7 +95,9 @@ export const caseCommands = [
       if (files.length === 0) return { text: `no cases under ${path.relative(ctx.root, dir) || '.'}; \`lynkeus case init\` writes one`, code: 1 };
       const cases = files.flatMap(readCases);
       const dry = !!ctx.flags['dry-run'];
-      const events = typeof ctx.flags.events === 'string';
+      const out = typeof ctx.flags.out === 'string' && !dry ? new RunFile(path.resolve(ctx.flags.out), ctx.root) : undefined;
+      // A run file files each event under its step, so it needs them collected.
+      const events = typeof ctx.flags.events === 'string' || out !== undefined;
       const host = ctx.flags.host && !dry ? await startHost(ctx.root, ctx.err) : undefined;
       const fixtures = config.fixtures && !dry ? new Fixtures(config.fixtures, home) : undefined;
       const stop = () => {
@@ -110,20 +114,28 @@ export const caseCommands = [
       try {
         for (const c of cases) {
           ctx.err(`▶ ${c.id}${c.title ? ` — ${c.title}` : ''}`);
+          let startedAt = new Date();
           let report: CaseReport & { retried?: boolean } = await runCase(c, { base: ctx, config, fixtures, dry, events, log: ctx.err });
           ctx.err(describe(report));
+          out?.add(c, { report, attempt: 1, startedAt });
           if (report.result === 'failed' && !ctx.flags.once && !dry) {
             ctx.err(`  retrying ${c.id} once`);
+            startedAt = new Date();
             report = { ...(await runCase(c, { base: ctx, config, fixtures, events, log: ctx.err })), retried: true };
             ctx.err(describe(report));
+            out?.add(c, { report, attempt: 2, startedAt });
           }
-          if (events && report.events) {
+          if (typeof ctx.flags.events === 'string' && report.events) {
             const out = path.resolve(ctx.flags.events as string, c.id);
             fs.mkdirSync(out, { recursive: true });
             fs.writeFileSync(eventsFile(out), report.events.map((e) => `${JSON.stringify(e)}\n`).join(''));
           }
           reports.push(report);
           if (ctx.flags.report) fs.appendFileSync(path.resolve(ctx.flags.report as string), `${JSON.stringify(report)}\n`);
+        }
+        if (out) {
+          const hello = (await ctx.device().catch(() => undefined))?.server.hello;
+          out.finish({ platform: hello?.platform, native: hello?.native });
         }
       } finally {
         stop();
