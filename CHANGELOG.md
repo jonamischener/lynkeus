@@ -2,6 +2,7 @@
 
 ## 0.2.0 (unreleased)
 
+- `case run` on a device, or a host that lists only its window: `app.see` and `app.press` scroll to what they look for, and `app.see` gives a missing target a short wait, a scroll and a long wait before its deadline counts. A case no longer needs a swipe written before each element below the fold.
 - Fixtures: before the first case lynkeus sends `{"command": "lynkeus.describe"}` to the project's fixtures command. A server that answers `{"commands": [...]}` has its cases checked first, and one that names a fixture missing from the list is refused before anything runs. A server that answers `"ok": false` is left unchecked. `case init`'s server answers it.
 - A case step the host cannot do (the app or host answers `Unknown method`) is reported as `unsupported` instead of failed. The case stops there with result `unsupported`, is not retried, and does not fail the run: `3/5 passed, 2 cannot run on this host`.
 - `case run --out <dir>` writes the run as a directory: `run.json` (when, on what, totals) and `cases.jsonl` (a line per attempt, each step with its section, outcome and the analytics events it caused). `lynkeus-protocol` exports its types (`RunManifest`, `RunCase`, `RunStep`, `RunEvent`) and `RUN_SCHEMA`, the contract for whatever reads a run.
