@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { Fixtures } from '../cases/fixtures.js';
 import { readCases } from '../cases/format.js';
-import { type CaseReport, runCase } from '../cases/runner.js';
+import { type CaseReport, missingFixtures, runCase } from '../cases/runner.js';
 import { CONFIG, EXAMPLE_CASE, FIXTURES, FORMAT } from '../cases/templates.js';
 import { configFile } from '../config.js';
 import { readJson, writeJson } from '../files.js';
@@ -113,6 +113,12 @@ export const caseCommands = [
       process.once('SIGTERM', interrupted);
       const reports: (CaseReport & { retried?: boolean })[] = [];
       try {
+        // A case that names a fixture the server does not have fails halfway, after it has changed the backend. Better not to start.
+        const described = await fixtures?.describe();
+        if (described) {
+          const missing = cases.flatMap((c) => missingFixtures(c, config, described.commands).map((name) => `${c.id}: no fixture ${name}`));
+          if (missing.length > 0) return { text: [...missing, `the fixtures command answers: ${described.commands.join(', ')}`].join('\n'), code: 1 };
+        }
         for (const c of cases) {
           ctx.err(`▶ ${c.id}${c.title ? ` — ${c.title}` : ''}`);
           let startedAt = new Date();

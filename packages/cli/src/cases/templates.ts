@@ -74,6 +74,11 @@ Any other step name is a **fixture**: lynkeus sends it to the command in
 ← {"ok": true, "user_id": "u_1", "name": "Ana"}
 \`\`\`
 
+Before the first case lynkeus sends \`{"command": "lynkeus.describe"}\`. A
+server that answers \`{"commands": ["create_user", …]}\` gets its cases checked
+first: one that names a fixture missing from the list is refused before
+anything runs. A server that answers \`"ok": false\` is not checked.
+
 \`as: u\` keeps the answer; \`{{u.user_id}}\` reads it later. \`assert\` calls
 the \`inspect\` fixture and checks one path of its answer with \`equals\`,
 \`includes\`, \`gte\`, \`lte\`, \`near\`, \`matches\`, \`present\` or \`absent\`.
@@ -139,6 +144,11 @@ const fixtures = {
 for await (const line of readline.createInterface({ input: process.stdin })) {
   if (!line.trim()) continue;
   const { command, params } = JSON.parse(line);
+  // lynkeus asks once what this server answers, and refuses a case that names anything else.
+  if (command === 'lynkeus.describe') {
+    console.log(JSON.stringify({ commands: Object.keys(fixtures) }));
+    continue;
+  }
   try {
     const fixture = fixtures[command];
     if (!fixture) throw new Error(\`no fixture \${command}\`);

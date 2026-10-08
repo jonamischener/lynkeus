@@ -10,7 +10,7 @@ import type { Device } from '../../device/driver.js';
 import { type Base, find, register } from '../../registry.js';
 import { Fixtures } from '../fixtures.js';
 import { parseCase } from '../format.js';
-import { argvFor, newSince, runCase } from '../runner.js';
+import { argvFor, missingFixtures, newSince, runCase } from '../runner.js';
 import { FIXTURES } from '../templates.js';
 
 register([...driveCommands, ...osCommands]);
@@ -257,4 +257,34 @@ steps:
     ],
   );
   assert.equal(report.evidence, undefined);
+});
+
+test('the fixtures server says what it answers, and a case that names anything else is caught', async () => {
+  const described = await fixtures.describe();
+  assert.ok(described?.commands.includes('create_user'));
+  const c = parseCase(
+    `---
+id: gift
+---
+setup:
+  - create_user: { as: u }
+  - grant_badge: { user: u }
+steps:
+  - app.see: { text: "Hello" }
+  - assert: { user: u, path: points, equals: 0 }
+`,
+    'gift.md',
+  );
+  assert.deepEqual(missingFixtures(c, config, described?.commands ?? []), ['grant_badge']);
+  assert.deepEqual(missingFixtures(c, { ...config, inspect: 'look' }, described?.commands ?? []), ['grant_badge', 'look']);
+});
+
+test('a fixtures server that does not describe itself is left unchecked', async () => {
+  fs.writeFileSync(path.join(root, 'old.mjs'), FIXTURES.replace("command === 'lynkeus.describe'", 'false'));
+  const old = new Fixtures({ command: 'node old.mjs' }, root);
+  try {
+    assert.equal(await old.describe(), undefined);
+  } finally {
+    old.close();
+  }
 });

@@ -74,6 +74,13 @@ the `inspect` fixture and checks one path of its answer with `equals`,
 `includes`, `gte`, `lte`, `near`, `matches`, `present` or `absent`.
 `exec: { run: "…", as? }` runs a shell command and keeps its JSON output.
 
+Before the first case lynkeus asks the fixtures command what it answers
+(`{"command": "lynkeus.describe"}`). A server that replies with
+`{"commands": ["create_user", …]}` has every case checked against that list,
+and a case naming a fixture that is not on it is refused before anything runs,
+instead of failing halfway with the backend already changed. A server that
+replies `"ok": false` is not checked.
+
 ## Steps of your own
 
 `cases.macros` names a step and the steps it stands for. Inside,
