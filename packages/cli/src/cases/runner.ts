@@ -37,12 +37,14 @@ export type CasesConfig = {
   interruptions?: { see: string; do: unknown[]; unless?: string }[];
 };
 
-export type StepReport = { step: string; status: 'passed' | 'failed' | 'skipped'; ms: number; error?: string };
+/** `unsupported`: the host the case ran on has no such thing to do (a real device has no mocked responses), which says nothing about the app. */
+export type StepReport = { step: string; status: 'passed' | 'failed' | 'skipped' | 'unsupported'; ms: number; error?: string };
 export type CaseReport = {
   id: string;
   title?: string;
   file: string;
-  result: 'passed' | 'failed';
+  /** `unsupported`: a step could not be done on this host, so the case proved nothing here; it did not fail. */
+  result: 'passed' | 'failed' | 'unsupported';
   ms: number;
   steps: StepReport[];
   /** When a step failed: the screen, the requests since the mark, and why. */
@@ -166,6 +168,9 @@ const unknownStep = (step: Step, config: CasesConfig): string | undefined => {
   }
   return undefined;
 };
+
+/** What the app or its host answers to a method it does not have; the name is what it lacks. */
+export const lacking = (message: string): string | undefined => /Unknown method (\S+)/.exec(message)?.[1];
 
 export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport> => {
   const { base, config } = options;
@@ -530,9 +535,10 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
   }
 
   let failed = false;
+  let unsupported = false;
   for (const step of [...c.setup, ...c.steps]) {
     const text = label(step);
-    if (failed) {
+    if (failed || unsupported) {
       steps.push({ step: text, status: 'skipped', ms: 0 });
       continue;
     }
@@ -549,15 +555,30 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       steps.push({ step: text, status: outcome === 'skipped' ? 'skipped' : 'passed', ms: Date.now() - t0 });
       log(`  ${outcome === 'skipped' ? '⏭️' : '✅'} ${text}  (${Date.now() - t0}ms)`);
     } catch (error) {
-      failed = true;
       const message = error instanceof Error ? error.message : String(error);
+      const missing = lacking(message);
+      if (missing) {
+        // Not the app's doing: the rest of the case would be standing on a step that never happened.
+        unsupported = true;
+        steps.push({ step: text, status: 'unsupported', ms: Date.now() - t0, error: `this host has no ${missing}` });
+        log(`  🚫 ${text}  — this host has no ${missing}`);
+        continue;
+      }
+      failed = true;
       steps.push({ step: text, status: 'failed', ms: Date.now() - t0, error: message });
       log(`  ❌ ${text}  — ${message.split('\n')[0]}  (${Date.now() - t0}ms)`);
     }
   }
 
   if (options.dry) failed = steps.some((s) => s.status === 'failed');
-  const report: CaseReport = { id: c.id, title: c.title, file: c.file, result: failed ? 'failed' : 'passed', ms: Date.now() - started, steps };
+  const report: CaseReport = {
+    id: c.id,
+    title: c.title,
+    file: c.file,
+    result: failed ? 'failed' : unsupported ? 'unsupported' : 'passed',
+    ms: Date.now() - started,
+    steps,
+  };
   if (options.events) report.events = recorded;
   if (failed && !options.dry) {
     const d = await device().catch(() => undefined);

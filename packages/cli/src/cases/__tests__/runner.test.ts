@@ -228,3 +228,33 @@ test('a step kept to a device is skipped on a host, and one kept to the host run
   );
   assert.equal(calls.filter((call) => call.method === 'press').length, 1);
 });
+
+test('a step the host cannot do stops the case without failing it', async () => {
+  const c = parseCase(
+    `---
+id: stores
+---
+steps:
+  - app.see: { text: "Hello" }
+  - app.call: { command: stores }
+  - app.see: { text: "25 points" }
+`,
+    'stores.md',
+  );
+  const { base } = fakeApp();
+  const device = await base.device();
+  (device as unknown as { command: (n: string) => Promise<unknown> }).command = async (name) => {
+    throw new Error(`Unknown method ${name}`);
+  };
+  const report = await runCase(c, { base, config, fixtures });
+  assert.equal(report.result, 'unsupported');
+  assert.deepEqual(
+    report.steps.map((s) => [s.status, s.error]),
+    [
+      ['passed', undefined],
+      ['unsupported', 'this host has no stores'],
+      ['skipped', undefined],
+    ],
+  );
+  assert.equal(report.evidence, undefined);
+});
