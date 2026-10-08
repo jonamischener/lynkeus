@@ -59,6 +59,12 @@ matrix: { locale: [en, fr], login: [phone, email] }
 
 `{{matrix.locale}}` anywhere in the file is that run's value.
 
+On a device, and on a host that lists only what its window shows, `app.see`
+and `app.press` look further down the page by themselves: a short wait in case
+the target is arriving, a scroll in case it is below the fold (never one that
+would drag a sheet shut), and a longer wait in case a carousel is about to show
+it. Only then does the step's deadline count.
+
 ## Steps that prepare and read the backend
 
 Any other step name is a **fixture**: lynkeus sends it to the command in

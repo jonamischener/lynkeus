@@ -293,16 +293,60 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     return undefined;
   };
 
+  /**
+   * A device, and a host that draws like one, lists what is in the window: what
+   * a step looks for may be further down the page. This scrolls the window
+   * itself, most of a screenful at a time, until `there` holds or the screen
+   * stops changing; then back up in short pulls (at the top of a sheet a short
+   * pull springs back, where a long one would drag the sheet shut).
+   */
+  const scrollTo = async (there: () => Promise<boolean>): Promise<boolean> => {
+    const d = await device();
+    if (!d.server.hello?.native) return false;
+    const { w, h } = (await d.screen()).window;
+    const x = Math.round(w / 2);
+    const listing = async () => JSON.stringify(presented(await d.screen()).map((e) => [e.testId, textOf(e), Math.round(e.frame.y)]));
+    const pull = async (from: number, to: number, times: number): Promise<boolean> => {
+      let before: string | undefined;
+      for (let i = 0; i < times; i++) {
+        if (await there()) return true;
+        const now = await listing();
+        if (now === before) return false;
+        before = now;
+        await execute(['swipe', '--from', `${x},${from}`, '--to', `${x},${to}`], base);
+        await d.idle({ quietMs: 150, timeoutMs: 1500 }).catch(() => undefined);
+      }
+      return there();
+    };
+    if (await pull(Math.round(h * 0.75), Math.round(h * 0.3), 12)) return true;
+    const middle = Math.round(h * 0.5);
+    return pull(middle, middle + 110, 30);
+  };
+
   const see = async (value: StepValue): Promise<void> => {
     const params = typeof value === 'string' ? { target: value } : ((value ?? {}) as Record<string, unknown>);
     const absent = params.absent === true;
     const wait = typeof params.timeoutMs === 'number' ? params.timeoutMs : 3000;
     const deadline = Date.now() + wait;
     const hard = Date.now() + Math.max(wait, 12_000);
+    // Where the listing is what the window shows, something missing gets three more looks before the
+    // deadline counts: a short wait (it may be arriving), a scroll (it may be further down), and a long
+    // wait (a carousel shows it a few seconds from now, and a host with its own clock gets there fast).
+    const what = targetIn(params) ?? (typeof params.text === 'string' ? ({ text: params.text } as Target) : undefined);
+    let looks = absent || !what || !(await device()).server.hello?.native ? 3 : 0;
     while (true) {
       await interrupted(value);
       const missing = await seen(params);
       if (absent ? missing !== undefined : missing === undefined) return;
+      if (looks < 3 && what && missing?.startsWith('not on screen')) {
+        const d = await device();
+        looks += 1;
+        if (looks === 1) await d.waitFor({ target: what, timeoutMs: 1500 }).catch(() => undefined);
+        else if (looks === 2) {
+          if (await scrollTo(async () => (await seen(params)) === undefined)) return;
+        } else await d.waitFor({ target: what, timeoutMs: 20_000 }).catch(() => undefined);
+        continue;
+      }
       if (Date.now() > deadline && Date.now() < hard && (await (await device()).screen()).busy) {
         await sleep(150);
         continue;
@@ -349,6 +393,8 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       if (Date.now() > deadline && !(await d.screen()).busy) break;
       await sleep(200);
     }
+    // Not listed at all: further down a page that only lists its window.
+    if (!(await d.server.call('find', target))) await scrollTo(async () => !!(await d.server.call('find', target)));
     const { optional: _optional, timeoutMs: _timeout, ...rest } = params;
     await cli(argvFor(find('press')!, rest as StepValue));
     return undefined;

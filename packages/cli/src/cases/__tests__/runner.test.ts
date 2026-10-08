@@ -288,3 +288,47 @@ test('a fixtures server that does not describe itself is left unchecked', async 
     old.close();
   }
 });
+
+test('on a host that lists its window, what a step looks for is scrolled to', async () => {
+  const c = parseCase(
+    `---
+id: below
+---
+steps:
+  - app.see: { text: "Terms" }
+`,
+    'below.md',
+  );
+  const { base } = fakeApp();
+  const device = await base.device();
+  let swipes = 0;
+  const fake = device as unknown as {
+    server: { hello?: { native: boolean }; call: (method: string, params: never) => Promise<unknown> };
+    screen: () => Promise<unknown>;
+    waitFor: () => Promise<never>;
+  };
+  const listed = fake.screen;
+  const call = fake.server.call;
+  fake.server.hello = { native: true };
+  fake.waitFor = async () => {
+    throw new Error('Timed out');
+  };
+  fake.server.call = async (method, params) => {
+    if (method !== 'swipe') return call(method, params);
+    swipes += 1;
+    return {};
+  };
+  // Two screenfuls down, the text comes into the window.
+  fake.screen = async () => {
+    const screen = (await listed()) as { elements: { kind: string; text?: string; frame: { y: number } }[] };
+    const text = screen.elements.find((e) => e.kind === 'text');
+    if (text) {
+      text.text = swipes >= 2 ? 'Terms and conditions' : `Paragraph ${swipes}`;
+      text.frame.y = 50 + swipes;
+    }
+    return screen;
+  };
+  const report = await runCase(c, { base, config, fixtures });
+  assert.equal(report.result, 'passed', report.steps.map((s) => s.error).join(' '));
+  assert.equal(swipes, 2);
+});
