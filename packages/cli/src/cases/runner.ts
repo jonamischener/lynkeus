@@ -169,6 +169,18 @@ const unknownStep = (step: Step, config: CasesConfig): string | undefined => {
   return undefined;
 };
 
+/**
+ * The fixtures a case names that the project's server did not list. A macro's
+ * own steps are the project's to keep right; these are the ones written in the case.
+ */
+export const missingFixtures = (c: Case, config: CasesConfig, known: string[]): string[] => {
+  const names = [...c.setup, ...c.steps].flatMap((step) => {
+    if (step.verb.startsWith('app.') || config.macros?.[step.verb] || step.verb === 'exec') return [];
+    return [step.verb === 'assert' ? (config.inspect ?? 'inspect') : step.verb];
+  });
+  return [...new Set(names)].filter((name) => !known.includes(name));
+};
+
 /** What the app or its host answers to a method it does not have; the name is what it lacks. */
 export const lacking = (message: string): string | undefined => /Unknown method (\S+)/.exec(message)?.[1];
 

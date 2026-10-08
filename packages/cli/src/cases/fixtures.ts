@@ -8,6 +8,15 @@
  * — and one line out, the step's answer: any JSON object, `"ok": false` and an
  * `error` when it failed. `params` is the step as written; `env` is the same
  * flattened to upper-case strings, for a server that hands them to a script.
+ *
+ * Before the first case lynkeus asks what the server can do —
+ *
+ *   {"command": "lynkeus.describe", "params": {}, "env": {}}
+ *
+ * — and a server that knows answers `{"commands": ["create_user", …]}`. With
+ * that, a case naming a fixture nobody answers is refused before anything
+ * runs. A server that answers `"ok": false`, as one written before this did,
+ * is taken to describe nothing, and its cases run unchecked.
  */
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import path from 'node:path';
@@ -16,6 +25,11 @@ import readline from 'node:readline';
 export type FixturesConfig = { command: string; cwd?: string; env?: Record<string, string>; timeoutMs?: number };
 
 export type Answer = Record<string, unknown>;
+
+/** The one command that is lynkeus's own and not the project's. */
+export const DESCRIBE = 'lynkeus.describe';
+
+export type Description = { commands: string[] };
 
 const envOf = (params: Record<string, unknown>): Record<string, string> =>
   Object.fromEntries(
@@ -88,6 +102,13 @@ export class Fixtures {
     const answer = JSON.parse(line) as Answer;
     if (answer.ok === false) throw new Error(`${command}: ${String(answer.error ?? answer.message ?? 'ok=false')}`);
     return answer;
+  }
+
+  /** What the server says it answers, or nothing when it does not say. */
+  async describe(): Promise<Description | undefined> {
+    const answer = await this.call(DESCRIBE, {}).catch(() => undefined);
+    const commands = answer?.commands;
+    return Array.isArray(commands) && commands.every((c) => typeof c === 'string') ? { commands } : undefined;
   }
 
   close(): void {
