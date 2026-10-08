@@ -9,6 +9,7 @@ npx lynkeus case init                 # an example case, this reference, a fixtu
 npx lynkeus case run                  # every case under cases.dir
 npx lynkeus case run cases/gift.md --host   # one case, hosting the app in Node for the run
 npx lynkeus case run --report out.jsonl     # one JSON line per case, for CI
+npx lynkeus case run --out run/            # the run as a directory a report can read
 ```
 
 A case is a markdown file: frontmatter that names it, then `setup`, `steps`
@@ -131,3 +132,24 @@ A failed case runs once more before it counts as failed (`--once` turns that
 off), and one that passes the second time is reported as passed on retry. A
 failed step leaves the screen as it was, the requests the app had made and,
 for a step on a target, why: covered, hidden behind a layer, disabled, gone.
+
+`--out <dir>` writes the run as a directory that a report, a dashboard or a
+script can read without knowing how the run was made:
+
+```
+run.json      when it started and ended, what the app ran on, the totals
+cases.jsonl   one line per attempt of a case, in the order they ran
+```
+
+A line of `cases.jsonl` carries the case's id, title, description and file, the
+attempt (1, or 2 for the second chance), the result, when it started, how long
+it took, and its steps. Each step says which part of the case it is (`setup` or
+`steps`), whether it passed, how long it took, its error, and the events the
+app sent to its analytics while it ran. A failed attempt keeps its evidence.
+
+The types are `RunManifest`, `RunCase`, `RunStep` and `RunEvent` in
+`lynkeus-protocol`, with `RUN_SCHEMA` in `run.json`. A field is only ever
+added; a change to what an existing field means raises the schema, and a
+reader should refuse a schema it does not know. `run.json` is written when the
+run starts and again when it ends, so a run that was cut short has no
+`finishedAt` and no `totals`.
