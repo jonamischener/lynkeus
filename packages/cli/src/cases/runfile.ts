@@ -80,6 +80,7 @@ export class RunFile {
       cases: cases.length,
       passed: cases.filter((c) => c.result === 'passed').length,
       failed: cases.filter((c) => c.result === 'failed').length,
+      unsupported: cases.filter((c) => c.result === 'unsupported').length,
       retried: cases.filter((c) => c.attempt > 1).length,
     };
     this.save();

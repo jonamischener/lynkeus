@@ -49,10 +49,11 @@ const stopGroup = (pid: number) => {
 };
 
 const describe = (report: CaseReport): string => {
-  const counts = { passed: 0, failed: 0, skipped: 0 };
+  const counts = { passed: 0, failed: 0, skipped: 0, unsupported: 0 };
   for (const s of report.steps) counts[s.status] += 1;
+  const headline = { passed: '✅ PASSED', failed: '❌ FAILED', unsupported: '🚫 NOT ON THIS HOST' }[report.result];
   const lines = [
-    `${report.result === 'passed' ? '✅ PASSED' : '❌ FAILED'}  ✅ ${counts.passed}${counts.failed ? `  ❌ ${counts.failed}` : ''}${counts.skipped ? `  ⏭️ ${counts.skipped}` : ''}  — ${(report.ms / 1000).toFixed(1)}s`,
+    `${headline}  ✅ ${counts.passed}${counts.failed ? `  ❌ ${counts.failed}` : ''}${counts.unsupported ? `  🚫 ${counts.unsupported}` : ''}${counts.skipped ? `  ⏭️ ${counts.skipped}` : ''}  — ${(report.ms / 1000).toFixed(1)}s`,
   ];
   if (report.evidence?.screen) lines.push('— screen at the failure:', ...report.evidence.screen.split('\n').map((l) => `    ${l}`));
   if (report.evidence?.requests?.length) lines.push('— requests:', ...report.evidence.requests.map((l) => `    ${l}`));
@@ -140,12 +141,16 @@ export const caseCommands = [
       } finally {
         stop();
       }
-      const passed = reports.filter((r) => r.result === 'passed').length;
+      const count = (result: CaseReport['result']) => reports.filter((r) => r.result === result).length;
+      const unsupported = count('unsupported');
       const summary = [
-        ...reports.map((r) => `${r.result === 'passed' ? '✅' : '❌'} ${r.id}${r.retried && r.result === 'passed' ? '  ⚠ passed on retry' : ''}`),
-        `${passed}/${reports.length} passed`,
+        ...reports.map(
+          (r) => `${{ passed: '✅', failed: '❌', unsupported: '🚫' }[r.result]} ${r.id}${r.retried && r.result === 'passed' ? '  ⚠ passed on retry' : ''}`,
+        ),
+        `${count('passed')}/${reports.length} passed${unsupported ? `, ${unsupported} cannot run on this host` : ''}`,
       ].join('\n');
-      return { text: summary, json: reports, code: passed === reports.length ? 0 : 1 };
+      // A case this host cannot run is not a failure of the app; only a failed case fails the run.
+      return { text: summary, json: reports, code: count('failed') === 0 ? 0 : 1 };
     },
   }),
   define({

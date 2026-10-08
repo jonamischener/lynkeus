@@ -84,5 +84,5 @@ test('a run keeps every attempt and counts a case by its last one', () => {
   assert.equal(manifest.finishedAt, '2026-01-02T03:01:00.000Z');
   assert.equal(manifest.platform, 'ios');
   assert.equal(manifest.native, false);
-  assert.deepEqual(manifest.totals, { cases: 1, passed: 1, failed: 0, retried: 1 });
+  assert.deepEqual(manifest.totals, { cases: 1, passed: 1, failed: 0, unsupported: 0, retried: 1 });
 });

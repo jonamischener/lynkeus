@@ -30,7 +30,8 @@ export type RunEvent = {
   requestId?: string;
 };
 
-export type RunStepStatus = 'passed' | 'failed' | 'skipped';
+/** `unsupported`: the host the run was on has no way to do the step; it says nothing about the app. */
+export type RunStepStatus = 'passed' | 'failed' | 'skipped' | 'unsupported';
 
 export type RunStep = {
   /** The step as the case words it. */
@@ -55,7 +56,8 @@ export type RunCase = {
   file: string;
   /** 1 for the first try; a case that failed and ran again has a line for each. */
   attempt: number;
-  result: 'passed' | 'failed';
+  /** `unsupported`: one of its steps could not be done on this host, so it proved nothing here. */
+  result: 'passed' | 'failed' | 'unsupported';
   /** ISO 8601. */
   startedAt: string;
   ms: number;
@@ -77,5 +79,5 @@ export type RunManifest = {
   /** Whether the app ran on a device or simulator (true) or hosted without one. */
   native?: boolean;
   /** Cases by their last attempt. */
-  totals?: { cases: number; passed: number; failed: number; retried: number };
+  totals?: { cases: number; passed: number; failed: number; unsupported: number; retried: number };
 };

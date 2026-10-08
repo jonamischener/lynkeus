@@ -133,6 +133,11 @@ off), and one that passes the second time is reported as passed on retry. A
 failed step leaves the screen as it was, the requests the app had made and,
 for a step on a target, why: covered, hidden behind a layer, disabled, gone.
 
+A step the host has no way to do (a mocked response on a real device, a command
+the app does not register in this build) is `unsupported`, not failed: the case
+stops there, counts as one that cannot run on this host, and does not fail the
+run. The same case then passes where the host can do it.
+
 `--out <dir>` writes the run as a directory that a report, a dashboard or a
 script can read without knowing how the run was made:
 
@@ -144,7 +149,7 @@ cases.jsonl   one line per attempt of a case, in the order they ran
 A line of `cases.jsonl` carries the case's id, title, description and file, the
 attempt (1, or 2 for the second chance), the result, when it started, how long
 it took, and its steps. Each step says which part of the case it is (`setup` or
-`steps`), whether it passed, how long it took, its error, and the events the
+`steps`), whether it passed, failed, was skipped or is unsupported on this host, how long it took, its error, and the events the
 app sent to its analytics while it ran. A failed attempt keeps its evidence.
 
 The types are `RunManifest`, `RunCase`, `RunStep` and `RunEvent` in
