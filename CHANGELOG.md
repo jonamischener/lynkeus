@@ -2,6 +2,7 @@
 
 ## 0.2.0 (unreleased)
 
+- Cases: `on:` takes `has:<command>` (the app registered that command, as a hosted build often does and a store build does not) and `!` in front of any condition, so one case or macro carries the way each host does a thing. `app.press` waits half a second for a target that is not listed and then scrolls to it, instead of spending its whole deadline first, and waits for a disabled control through the app rather than by sleeping, which lets a host with its own clock move on.
 - `case run` on a device, or a host that lists only its window: `app.see` and `app.press` scroll to what they look for, and `app.see` gives a missing target a short wait, a scroll and a long wait before its deadline counts. A case no longer needs a swipe written before each element below the fold.
 - Fixtures: before the first case lynkeus sends `{"command": "lynkeus.describe"}` to the project's fixtures command. A server that answers `{"commands": [...]}` has its cases checked first, and one that names a fixture missing from the list is refused before anything runs. A server that answers `"ok": false` is left unchecked. `case init`'s server answers it.
 - A case step the host cannot do (the app or host answers `Unknown method`) is reported as `unsupported` instead of failed. The case stops there with result `unsupported`, is not retried, and does not fail the run: `3/5 passed, 2 cannot run on this host`.

@@ -384,17 +384,23 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       );
       if (!there) return 'skipped';
     }
-    // The control may still be arriving, or disabled while what it depends on loads.
+    // Not listed at all: arriving, or further down a page that only lists its window. A short wait, then
+    // a scroll, rather than spending the whole deadline on something that is below the fold.
+    const listed = async () => !!(await d.server.call('find', target));
+    if (!(await listed())) {
+      await d.waitFor({ target, timeoutMs: 500 }).catch(() => undefined);
+      if (!(await listed())) await scrollTo(listed);
+    }
+    // The control may still be disabled while what it depends on loads. The waits go through the app,
+    // so a host with its own clock moves it on instead of standing still while this one sleeps.
     const deadline = Date.now() + (typeof params.timeoutMs === 'number' ? params.timeoutMs : 3000);
     const hard = Date.now() + 15_000;
     while (Date.now() < hard && 'testId' in target) {
       const found = (await d.server.call('find', target)) as Element | null;
       if (found?.enabled) break;
       if (Date.now() > deadline && !(await d.screen()).busy) break;
-      await sleep(200);
+      await d.idle({ quietMs: 50, timeoutMs: 200 }).catch(() => undefined);
     }
-    // Not listed at all: further down a page that only lists its window.
-    if (!(await d.server.call('find', target))) await scrollTo(async () => !!(await d.server.call('find', target)));
     const { optional: _optional, timeoutMs: _timeout, ...rest } = params;
     await cli(argvFor(find('press')!, rest as StepValue));
     return undefined;
@@ -424,7 +430,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
   const ready = async () => {
     const d = await device();
     const deadline = Date.now() + 5000;
-    while ((await d.screen()).busy && Date.now() < deadline) await sleep(100);
+    while ((await d.screen()).busy && Date.now() < deadline) await d.idle({ quietMs: 50, timeoutMs: 200 }).catch(() => undefined);
   };
 
   let handling = false;
@@ -564,11 +570,19 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     }
   };
 
+  /**
+   * `device`, `headless`, a platform, or `has:<command>` for a host whose app
+   * registered that command (a hosted build often has commands a store build
+   * does not); `!` in front turns any of them around. One case then carries the
+   * way each host does a thing, and runs on all of them.
+   */
   const runsHere = async (on: string): Promise<boolean> => {
+    if (on.startsWith('!')) return !(await runsHere(on.slice(1)));
     const hello = (await device()).server.hello;
     const native = !!hello?.native;
     if (on === 'device') return native;
     if (on === 'headless') return !native;
+    if (on.startsWith('has:')) return !!hello?.commands?.includes(on.slice(4));
     return hello?.platform === on;
   };
 
