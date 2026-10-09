@@ -16,7 +16,7 @@ import { type AppEvent, normalizeEvents, type RunEvent } from '../knowledge/even
 import { type Base, type Command, find } from '../registry.js';
 import { execute } from '../runtime.js';
 import { isRoute, parseTarget, scopedTarget } from '../targets.js';
-import type { Call, Fixtures, FixturesConfig } from './fixtures.js';
+import type { Fixtures, FixturesConfig } from './fixtures.js';
 import { type Case, dig, interpolate, matcherOf, matches, type Scope, type Step, stepOf, type StepValue } from './format.js';
 
 export type CasesConfig = {
@@ -83,7 +83,19 @@ export type RunOptions = {
   events?: boolean;
   evidence?: Evidence;
   log?: (line: string) => void;
+  /** The case's setup, already run by `case prepare`: the case starts from here. */
+  prepared?: Prepared;
+  /** Run only the setup and hand what it left to `keep`, for a case that will run later. */
+  setupOnly?: { keep: (prepared: Prepared) => void };
 };
+
+/** What a case's setup leaves for its steps: the aliases and what they answered, and what ran. */
+export type Prepared = { scope: Scope; latest: Record<string, unknown>; ran: string[]; steps: StepReport[] };
+
+/** A setup made only of the project's fixtures can run before the case, with no app attached. */
+export const preparable = (c: Case, config: CasesConfig): boolean =>
+  c.setup.length > 0 &&
+  c.setup.every((step) => !step.on && !step.verb.startsWith('app.') && !config.macros?.[step.verb] && step.verb !== 'exec' && step.verb !== 'assert');
 
 /** What a buffer holds that it did not before, whichever end it grows from. */
 export const newSince = (before: AppEvent[], now: AppEvent[]): AppEvent[] => {
@@ -211,29 +223,15 @@ export const missingFixtures = (c: Case, config: CasesConfig, known: string[]): 
   return [...new Set(names)].filter((name) => !known.includes(name));
 };
 
-/**
- * The fixtures a case's setup will call that could be made before it starts: those whose
- * parameters read nothing an earlier step produces (no alias, no `{{…}}`) and that every host runs.
- */
-export const upcoming = (c: Case, config: CasesConfig): Call[] =>
-  c.setup.flatMap((step) => {
-    if (step.on || step.verb.startsWith('app.') || config.macros?.[step.verb] || step.verb === 'exec' || step.verb === 'assert') return [];
-    const value = step.value ?? {};
-    if (typeof value !== 'object' || Array.isArray(value)) return [];
-    const { as: _as, ...params } = value as Record<string, unknown>;
-    if (JSON.stringify(params).includes('{{') || Object.keys(config.refs ?? {}).some((ref) => ref in params)) return [];
-    return [{ command: step.verb, params }];
-  });
-
 /** What the app or its host answers to a method it does not have; the name is what it lacks. */
 export const lacking = (message: string): string | undefined => /Unknown method (\S+)/.exec(message)?.[1];
 
 export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport> => {
   const { base, config } = options;
   const log = options.log ?? (() => undefined);
-  const scope: Scope = {};
-  const ran = new Set<string>();
-  const latest: Record<string, unknown> = {};
+  const scope: Scope = structuredClone(options.prepared?.scope ?? {});
+  const ran = new Set<string>(options.prepared?.ran ?? []);
+  const latest: Record<string, unknown> = structuredClone(options.prepared?.latest ?? {});
   const started = Date.now();
   const steps: StepReport[] = [];
   let mark: number | undefined;
@@ -711,7 +709,12 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
 
   let failed = false;
   let unsupported = false;
-  for (const step of [...c.setup, ...c.steps]) {
+  if (options.prepared) {
+    steps.push(...options.prepared.steps);
+    log(`  ⚡ setup made ahead (${options.prepared.steps.length} steps)`);
+  }
+  const todo = options.setupOnly ? c.setup : options.prepared ? c.steps : [...c.setup, ...c.steps];
+  for (const step of todo) {
     const text = label(step);
     if (failed || unsupported) {
       steps.push({ step: text, status: 'skipped', ms: 0 });
@@ -751,6 +754,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     }
   }
 
+  if (options.setupOnly && !failed) options.setupOnly.keep({ scope, latest, ran: [...ran], steps });
   if (options.dry) failed = steps.some((s) => s.status === 'failed');
   const report: CaseReport = {
     id: c.id,
@@ -765,7 +769,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     await (await device()).command('record', { stop: true }).catch(() => undefined);
     if (film && fs.existsSync(film)) report.video = film;
   }
-  if (failed && !options.dry) {
+  if (failed && !options.dry && !options.setupOnly) {
     const d = await device().catch(() => undefined);
     // A step that failed on its own reading of the screen left no reasons; ask for them.
     if (!why && d?.server.connected) why = (await execute(['why'], base).catch(() => undefined))?.text || undefined;

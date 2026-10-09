@@ -18,14 +18,10 @@
  * runs. A server that answers `"ok": false`, as one written before this did,
  * is taken to describe nothing, and its cases run unchecked.
  *
- * Before a run of several cases lynkeus says what the ones still to come will
- * ask for, in the order they will ask —
- *
- *   {"command": "lynkeus.prepare", "params": {"calls": [{"command": "create_user", "params": {…}, "env": {…}}]}}
- *
- * — so a server may make those while the cases before them run, and hand one
- * over when the same call arrives. Only calls that read nothing an earlier step
- * produces are listed. A server is free to ignore it; nothing waits on the answer.
+ * A connection that makes cases' setups ahead of time (`case prepare`) says so
+ * first, with `lynkeus.ahead`, so a server may give its work a lower priority
+ * than the cases running meanwhile. A server that does not know it is free to
+ * answer anything.
  */
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import path from 'node:path';
@@ -40,10 +36,8 @@ export const DESCRIBE = 'lynkeus.describe';
 
 export type Description = { commands: string[] };
 
-/** lynkeus's second own command: what cases still to run will ask for. */
-export const PREPARE = 'lynkeus.prepare';
-
-export type Call = { command: string; params: Record<string, unknown> };
+/** lynkeus's second own command: this connection works ahead of the cases. */
+export const AHEAD = 'lynkeus.ahead';
 
 const envOf = (params: Record<string, unknown>): Record<string, string> =>
   Object.fromEntries(
@@ -125,10 +119,9 @@ export class Fixtures {
     return Array.isArray(commands) && commands.every((c) => typeof c === 'string') ? { commands } : undefined;
   }
 
-  /** Tells the server what is coming. Whatever it answers, the run goes on. */
-  async prepare(calls: Call[]): Promise<void> {
-    if (calls.length === 0) return;
-    await this.call(PREPARE, { calls: calls.map((c) => ({ ...c, env: envOf(c.params) })) }).catch(() => undefined);
+  /** Says this connection works ahead of the cases being run. Whatever the server answers, it goes on. */
+  async ahead(): Promise<void> {
+    await this.call(AHEAD, {}).catch(() => undefined);
   }
 
   close(): void {
