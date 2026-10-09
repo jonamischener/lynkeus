@@ -17,6 +17,15 @@
  * that, a case naming a fixture nobody answers is refused before anything
  * runs. A server that answers `"ok": false`, as one written before this did,
  * is taken to describe nothing, and its cases run unchecked.
+ *
+ * Before a run of several cases lynkeus says what the ones still to come will
+ * ask for, in the order they will ask —
+ *
+ *   {"command": "lynkeus.prepare", "params": {"calls": [{"command": "create_user", "params": {…}, "env": {…}}]}}
+ *
+ * — so a server may make those while the cases before them run, and hand one
+ * over when the same call arrives. Only calls that read nothing an earlier step
+ * produces are listed. A server is free to ignore it; nothing waits on the answer.
  */
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import path from 'node:path';
@@ -30,6 +39,11 @@ export type Answer = Record<string, unknown>;
 export const DESCRIBE = 'lynkeus.describe';
 
 export type Description = { commands: string[] };
+
+/** lynkeus's second own command: what cases still to run will ask for. */
+export const PREPARE = 'lynkeus.prepare';
+
+export type Call = { command: string; params: Record<string, unknown> };
 
 const envOf = (params: Record<string, unknown>): Record<string, string> =>
   Object.fromEntries(
@@ -109,6 +123,12 @@ export class Fixtures {
     const answer = await this.call(DESCRIBE, {}).catch(() => undefined);
     const commands = answer?.commands;
     return Array.isArray(commands) && commands.every((c) => typeof c === 'string') ? { commands } : undefined;
+  }
+
+  /** Tells the server what is coming. Whatever it answers, the run goes on. */
+  async prepare(calls: Call[]): Promise<void> {
+    if (calls.length === 0) return;
+    await this.call(PREPARE, { calls: calls.map((c) => ({ ...c, env: envOf(c.params) })) }).catch(() => undefined);
   }
 
   close(): void {

@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { Fixtures } from '../cases/fixtures.js';
 import { readCases } from '../cases/format.js';
-import { type CaseReport, missingFixtures, runCase } from '../cases/runner.js';
+import { type CaseReport, missingFixtures, runCase, upcoming } from '../cases/runner.js';
 import { CONFIG, EXAMPLE_CASE, FIXTURES, FORMAT } from '../cases/templates.js';
 import { configFile } from '../config.js';
 import { readJson, writeJson } from '../files.js';
@@ -62,6 +62,21 @@ const describe = (report: CaseReport): string => {
   return lines.join('\n');
 };
 
+/** The case files named, or every case under the cases directory; a sentence when there are none. */
+const caseFiles = (args: string[], home: string, casesDir: string | undefined): string[] | string => {
+  const dir = path.resolve(home, casesDir ?? 'cases');
+  const files = args.length
+    ? args.map((f) => path.resolve(f))
+    : fs.existsSync(dir)
+      ? fs
+          .readdirSync(dir)
+          .filter((f) => f.endsWith('.md') && !/^(README|FORMAT|CATALOG)\.md$/i.test(f) && !f.startsWith('.'))
+          .sort()
+          .map((f) => path.join(dir, f))
+      : [];
+  return files.length > 0 ? files : `no cases under ${path.relative(home, dir) || '.'}; \`lynkeus case init\` writes one`;
+};
+
 export const caseCommands = [
   define({
     name: 'case run',
@@ -88,17 +103,8 @@ export const caseCommands = [
     run: async (ctx) => {
       const config = ctx.config.cases ?? {};
       const home = config.base ?? ctx.root;
-      const dir = path.resolve(home, config.dir ?? 'cases');
-      const files = ctx.args.length
-        ? ctx.args.map((f) => path.resolve(f))
-        : fs.existsSync(dir)
-          ? fs
-              .readdirSync(dir)
-              .filter((f) => f.endsWith('.md') && !/^(README|FORMAT|CATALOG)\.md$/i.test(f) && !f.startsWith('.'))
-              .sort()
-              .map((f) => path.join(dir, f))
-          : [];
-      if (files.length === 0) return { text: `no cases under ${path.relative(ctx.root, dir) || '.'}; \`lynkeus case init\` writes one`, code: 1 };
+      const files = caseFiles(ctx.args, home, config.dir);
+      if (typeof files === 'string') return { text: files, code: 1 };
       const cases = files.flatMap(readCases);
       const dry = !!ctx.flags['dry-run'];
       const out = typeof ctx.flags.out === 'string' && !dry ? new RunFile(path.resolve(ctx.flags.out), ctx.root) : undefined;
@@ -135,6 +141,8 @@ export const caseCommands = [
           const missing = cases.flatMap((c) => missingFixtures(c, config, described.commands).map((name) => `${c.id}: no fixture ${name}`));
           if (missing.length > 0) return { text: [...missing, `the fixtures command answers: ${described.commands.join(', ')}`].join('\n'), code: 1 };
         }
+        // The first case's setup is asked for right away; the server may get the rest ready meanwhile.
+        await fixtures?.prepare(cases.slice(1).flatMap((c) => upcoming(c, config)));
         for (const c of cases) {
           ctx.err(`▶ ${c.id}${c.title ? ` — ${c.title}` : ''}`);
           let startedAt = new Date();
@@ -184,6 +192,32 @@ export const caseCommands = [
       ledger?.save();
       // A case this host cannot run is not a failure of the app; only a failed case fails the run.
       return { text: summary, json: reports, code: count('failed') === 0 ? 0 : 1 };
+    },
+  }),
+  define({
+    name: 'case prepare',
+    group: 'runs',
+    summary: "Tell the project's fixtures server what the cases will ask for, so it can get it ready",
+    details:
+      'For a suite that starts `case run` once per case: run this first with the cases in the order they will run. The server is handed every fixture call it could make ahead (`lynkeus.prepare`) and may make them while earlier cases run; one it does not know the message ignores it.',
+    positionals: [{ name: 'files', help: 'case files, in the order they will run (default: every .md under cases.dir)', rest: true }],
+    needs: 'nothing',
+    session: false,
+    mcp: false,
+    run: async (ctx) => {
+      const config = ctx.config.cases ?? {};
+      if (!config.fixtures) return { text: 'the project declares no fixtures (cases.fixtures in lynkeus.config.json): nothing to prepare', code: 1 };
+      const home = config.base ?? ctx.root;
+      const files = caseFiles(ctx.args, home, config.dir);
+      if (typeof files === 'string') return { text: files, code: 1 };
+      const calls = files.flatMap(readCases).flatMap((c) => upcoming(c, config));
+      const fixtures = new Fixtures(config.fixtures, home);
+      try {
+        await fixtures.prepare(calls);
+      } finally {
+        fixtures.close();
+      }
+      return { text: `${calls.length} fixture calls announced`, json: { calls: calls.length } };
     },
   }),
   define({

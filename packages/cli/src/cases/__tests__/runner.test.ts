@@ -10,7 +10,7 @@ import type { Device } from '../../device/driver.js';
 import { type Base, find, register } from '../../registry.js';
 import { Fixtures } from '../fixtures.js';
 import { parseCase } from '../format.js';
-import { argvFor, missingFixtures, newSince, runCase } from '../runner.js';
+import { argvFor, missingFixtures, newSince, runCase, upcoming } from '../runner.js';
 import { FIXTURES } from '../templates.js';
 
 register([...driveCommands, ...osCommands]);
@@ -382,4 +382,25 @@ steps:
     report.steps.map((s) => s.status),
     ['skipped', 'passed'],
   );
+});
+
+test('only setup calls that read nothing produced earlier are announced ahead', () => {
+  const c = parseCase(
+    `---
+id: ahead
+---
+setup:
+  - create_user: { as: u, country: argentina }
+  - deposit: { user: u, amount: 10 }
+  - create_user: { as: v, name: "{{u.username}} friend" }
+  - on: device
+    do:
+      - create_user: { as: w }
+  - app.login: { as: u }
+steps:
+  - create_user: { as: x }
+`,
+    'ahead.md',
+  );
+  assert.deepEqual(upcoming(c, { refs: { user: 'user_id' }, macros: { 'app.login': [] } }), [{ command: 'create_user', params: { country: 'argentina' } }]);
 });

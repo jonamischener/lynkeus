@@ -16,7 +16,7 @@ import { type AppEvent, normalizeEvents, type RunEvent } from '../knowledge/even
 import { type Base, type Command, find } from '../registry.js';
 import { execute } from '../runtime.js';
 import { isRoute, parseTarget, scopedTarget } from '../targets.js';
-import type { Fixtures, FixturesConfig } from './fixtures.js';
+import type { Call, Fixtures, FixturesConfig } from './fixtures.js';
 import { type Case, dig, interpolate, matcherOf, matches, type Scope, type Step, stepOf, type StepValue } from './format.js';
 
 export type CasesConfig = {
@@ -210,6 +210,20 @@ export const missingFixtures = (c: Case, config: CasesConfig, known: string[]): 
   });
   return [...new Set(names)].filter((name) => !known.includes(name));
 };
+
+/**
+ * The fixtures a case's setup will call that could be made before it starts: those whose
+ * parameters read nothing an earlier step produces (no alias, no `{{…}}`) and that every host runs.
+ */
+export const upcoming = (c: Case, config: CasesConfig): Call[] =>
+  c.setup.flatMap((step) => {
+    if (step.on || step.verb.startsWith('app.') || config.macros?.[step.verb] || step.verb === 'exec' || step.verb === 'assert') return [];
+    const value = step.value ?? {};
+    if (typeof value !== 'object' || Array.isArray(value)) return [];
+    const { as: _as, ...params } = value as Record<string, unknown>;
+    if (JSON.stringify(params).includes('{{') || Object.keys(config.refs ?? {}).some((ref) => ref in params)) return [];
+    return [{ command: step.verb, params }];
+  });
 
 /** What the app or its host answers to a method it does not have; the name is what it lacks. */
 export const lacking = (message: string): string | undefined => /Unknown method (\S+)/.exec(message)?.[1];
