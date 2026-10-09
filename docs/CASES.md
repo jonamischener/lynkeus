@@ -41,7 +41,7 @@ native screen the host never shows — is kept to it; everywhere else it is
 skipped:
 
 ```yaml
-  - on: device        # or headless, ios, android
+  - on: device        # or headless, ios, android, has:<command>; ! in front turns it around
     do:
       - app.press: "364,84"
 ```

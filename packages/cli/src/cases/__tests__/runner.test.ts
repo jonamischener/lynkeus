@@ -332,3 +332,28 @@ steps:
   assert.equal(report.result, 'passed', report.steps.map((s) => s.error).join(' '));
   assert.equal(swipes, 2);
 });
+
+test('a step kept to a host whose app has a command runs only there', async () => {
+  const c = parseCase(
+    `---
+id: has
+---
+steps:
+  - on: "has:session"
+    do:
+      - app.see: { text: "Hello" }
+  - on: "!has:session"
+    do:
+      - app.see: { text: "never shown" }
+`,
+    'has.md',
+  );
+  const { base } = fakeApp();
+  const device = await base.device();
+  (device as unknown as { server: { hello: unknown } }).server.hello = { native: false, commands: ['session'] };
+  const report = await runCase(c, { base, config, fixtures });
+  assert.deepEqual(
+    report.steps.map((s) => s.status),
+    ['passed', 'skipped'],
+  );
+});
