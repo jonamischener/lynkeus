@@ -1,13 +1,15 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { Fixtures } from '../cases/fixtures.js';
 import { readCases } from '../cases/format.js';
-import { type CaseReport, missingFixtures, runCase } from '../cases/runner.js';
+import { type CaseReport, missingFixtures, preparable, runCase } from '../cases/runner.js';
 import { CONFIG, EXAMPLE_CASE, FIXTURES, FORMAT } from '../cases/templates.js';
 import { configFile } from '../config.js';
 import { readJson, writeJson } from '../files.js';
+import { Ahead } from '../cases/ahead.js';
 import { Flakes } from '../cases/flakes.js';
 import { RunFile } from '../cases/runfile.js';
 import { eventsFile } from '../knowledge/events.js';
@@ -62,6 +64,37 @@ const describe = (report: CaseReport): string => {
   return lines.join('\n');
 };
 
+/** The share of the machine's CPU that sat idle over the next 300 ms. */
+const idleShare = async (): Promise<number> => {
+  const total = () =>
+    os.cpus().reduce(
+      (sum, cpu) => {
+        const t = cpu.times;
+        return { idle: sum.idle + t.idle, all: sum.all + t.idle + t.user + t.sys + t.nice + t.irq };
+      },
+      { idle: 0, all: 0 },
+    );
+  const before = total();
+  await new Promise((r) => setTimeout(r, 300));
+  const after = total();
+  return after.all > before.all ? (after.idle - before.idle) / (after.all - before.all) : 1;
+};
+
+/** The case files named, or every case under the cases directory; a sentence when there are none. */
+const caseFiles = (args: string[], home: string, casesDir: string | undefined): string[] | string => {
+  const dir = path.resolve(home, casesDir ?? 'cases');
+  const files = args.length
+    ? args.map((f) => path.resolve(f))
+    : fs.existsSync(dir)
+      ? fs
+          .readdirSync(dir)
+          .filter((f) => f.endsWith('.md') && !/^(README|FORMAT|CATALOG)\.md$/i.test(f) && !f.startsWith('.'))
+          .sort()
+          .map((f) => path.join(dir, f))
+      : [];
+  return files.length > 0 ? files : `no cases under ${path.relative(home, dir) || '.'}; \`lynkeus case init\` writes one`;
+};
+
 export const caseCommands = [
   define({
     name: 'case run',
@@ -80,6 +113,7 @@ export const caseCommands = [
       video: { type: 'boolean', help: 'with --out: film each case, where the host films (the step says at what second it began)' },
       'video-fps': { type: 'number', help: 'frames per second of the film', default: 30, value: 'n' },
       flakes: { type: 'string', help: 'the ledger of how each case did across runs (default .lynkeus/flakes.json)', value: 'file' },
+      prepared: { type: 'string', help: 'where `case prepare` leaves setups made ahead; a case found there skips its setup', value: 'dir' },
       'dry-run': { type: 'boolean', help: 'parse and list the steps without running them' },
     },
     needs: 'nothing',
@@ -88,17 +122,8 @@ export const caseCommands = [
     run: async (ctx) => {
       const config = ctx.config.cases ?? {};
       const home = config.base ?? ctx.root;
-      const dir = path.resolve(home, config.dir ?? 'cases');
-      const files = ctx.args.length
-        ? ctx.args.map((f) => path.resolve(f))
-        : fs.existsSync(dir)
-          ? fs
-              .readdirSync(dir)
-              .filter((f) => f.endsWith('.md') && !/^(README|FORMAT|CATALOG)\.md$/i.test(f) && !f.startsWith('.'))
-              .sort()
-              .map((f) => path.join(dir, f))
-          : [];
-      if (files.length === 0) return { text: `no cases under ${path.relative(ctx.root, dir) || '.'}; \`lynkeus case init\` writes one`, code: 1 };
+      const files = caseFiles(ctx.args, home, config.dir);
+      if (typeof files === 'string') return { text: files, code: 1 };
       const cases = files.flatMap(readCases);
       const dry = !!ctx.flags['dry-run'];
       const out = typeof ctx.flags.out === 'string' && !dry ? new RunFile(path.resolve(ctx.flags.out), ctx.root) : undefined;
@@ -112,6 +137,7 @@ export const caseCommands = [
               ...(ctx.flags.video ? { video: { fps: Number(ctx.flags['video-fps'] ?? 30) } } : {}),
             }
           : undefined;
+      const ahead = typeof ctx.flags.prepared === 'string' && !dry ? new Ahead(path.resolve(ctx.flags.prepared)) : undefined;
       const ledger = dry ? undefined : new Flakes(path.resolve(ctx.root, typeof ctx.flags.flakes === 'string' ? ctx.flags.flakes : '.lynkeus/flakes.json'));
       // A run file files each event under its step, so it needs them collected.
       const events = typeof ctx.flags.events === 'string' || out !== undefined;
@@ -138,6 +164,7 @@ export const caseCommands = [
         for (const c of cases) {
           ctx.err(`▶ ${c.id}${c.title ? ` — ${c.title}` : ''}`);
           let startedAt = new Date();
+          ahead?.start(c);
           let report: CaseReport & { retried?: boolean } = await runCase(c, {
             base: ctx,
             config,
@@ -146,6 +173,7 @@ export const caseCommands = [
             events,
             evidence: evidenceOf(c.id, 1),
             log: ctx.err,
+            prepared: ahead?.take(c),
           });
           ctx.err(describe(report));
           out?.add(c, { report, attempt: 1, startedAt });
@@ -184,6 +212,61 @@ export const caseCommands = [
       ledger?.save();
       // A case this host cannot run is not a failure of the app; only a failed case fails the run.
       return { text: summary, json: reports, code: count('failed') === 0 ? 0 : 1 };
+    },
+  }),
+  define({
+    name: 'case prepare',
+    group: 'runs',
+    summary: 'Run the setup of cases ahead of them, so each starts at its first step',
+    details:
+      'For a suite that starts `case run --prepared <dir>` once per case: start this first, with the same cases in the order they will run, and leave it running. It runs every setup made only of the project fixtures and leaves what each produced in <dir>; a case that starts before its setup is ready runs its own, and this skips it. It asks the fixtures server for a lower priority (`lynkeus.ahead`), so it takes what the running cases leave of the machine.',
+    positionals: [{ name: 'files', help: 'case files, in the order they will run (default: every .md under cases.dir)', rest: true }],
+    flags: {
+      prepared: { type: 'string', help: 'where to leave the setups (emptied first)', value: 'dir', default: '.lynkeus/prepared' },
+      jobs: { type: 'number', help: 'setups made at once', value: 'n', default: 1 },
+      ahead: { type: 'number', help: 'setups kept ready and not yet taken, at most', value: 'n', default: 4 },
+      idle: { type: 'number', help: 'start a setup only while at least this share of the CPU is idle (0 to 1)', value: 'share', default: 0.25 },
+    },
+    needs: 'nothing',
+    session: false,
+    mcp: false,
+    run: async (ctx) => {
+      const config = ctx.config.cases ?? {};
+      if (!config.fixtures) return { text: 'the project declares no fixtures (cases.fixtures in lynkeus.config.json): nothing to prepare', code: 1 };
+      const declared = config.fixtures;
+      const home = config.base ?? ctx.root;
+      const files = caseFiles(ctx.args, home, config.dir);
+      if (typeof files === 'string') return { text: files, code: 1 };
+      const cases = files.flatMap(readCases).filter((c) => preparable(c, config));
+      const ahead = new Ahead(path.resolve(ctx.root, String(ctx.flags.prepared ?? '.lynkeus/prepared')));
+      ahead.clear();
+      const limit = Math.max(1, Number(ctx.flags.ahead ?? 4));
+      const idle = Number(ctx.flags.idle ?? 0.25);
+      let next = 0;
+      let made = 0;
+      let skipped = 0;
+      const worker = async () => {
+        const fixtures = new Fixtures(declared, home);
+        await fixtures.ahead();
+        try {
+          for (let c = cases[next++]; c; c = cases[next++]) {
+            // Far enough ahead, or the machine busy: a setup made then only takes the CPU from the cases
+            // running now, and the suite gains nothing from having it early.
+            while (!ahead.started(c) && (ahead.waiting() >= limit || (await idleShare()) < idle));
+            if (ahead.started(c)) {
+              skipped++;
+              continue;
+            }
+            const done = c;
+            await runCase(done, { base: ctx, config, fixtures, setupOnly: { keep: (p) => ahead.keep(done, p) } });
+            made++;
+          }
+        } finally {
+          fixtures.close();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, Number(ctx.flags.jobs ?? 2)) }, worker));
+      return { text: `${made} setups made ahead, ${skipped} cases had started first`, json: { made, skipped } };
     },
   }),
   define({

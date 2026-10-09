@@ -10,7 +10,7 @@ import type { Device } from '../../device/driver.js';
 import { type Base, find, register } from '../../registry.js';
 import { Fixtures } from '../fixtures.js';
 import { parseCase } from '../format.js';
-import { argvFor, missingFixtures, newSince, runCase } from '../runner.js';
+import { argvFor, missingFixtures, newSince, type Prepared, preparable, runCase } from '../runner.js';
 import { FIXTURES } from '../templates.js';
 
 register([...driveCommands, ...osCommands]);
@@ -382,4 +382,36 @@ steps:
     report.steps.map((s) => s.status),
     ['skipped', 'passed'],
   );
+});
+
+test('a setup made ahead is where the case starts, and the backend is not asked again', async () => {
+  const c = parseCase(
+    `---
+id: ahead
+---
+setup:
+  - create_user: { as: u, name: "Ana" }
+  - give_points: { user: u, points: 25 }
+steps:
+  - assert: { user: u, path: points, equals: 25 }
+  - assert: { path: name, equals: "Ana" }
+`,
+    'ahead.md',
+  );
+  assert.equal(preparable(c, config), true);
+  let kept: Prepared | undefined;
+  const { base } = fakeApp();
+  await runCase(c, { base, config, fixtures, setupOnly: { keep: (p) => (kept = p) } });
+  assert.ok(kept);
+  const asked: string[] = [];
+  const counting = { call: async (name: string, params: Record<string, unknown>) => (asked.push(name), fixtures.call(name, params)) } as Fixtures;
+  const report = await runCase(c, { base, config, fixtures: counting, prepared: kept });
+  assert.equal(report.result, 'passed', report.steps.map((s) => s.error).join(' '));
+  assert.deepEqual(asked, ['inspect', 'inspect']);
+  assert.equal(report.steps.length, 4);
+});
+
+test('a setup that drives the app is not made ahead', () => {
+  const c = parseCase('---\nid: app\n---\nsetup:\n  - create_user: { as: u }\n  - app.login: { as: u }\n', 'app.md');
+  assert.equal(preparable(c, { macros: { 'app.login': [] } }), false);
 });
