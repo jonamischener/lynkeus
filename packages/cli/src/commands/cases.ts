@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { Fixtures } from '../cases/fixtures.js';
@@ -61,6 +62,22 @@ const describe = (report: CaseReport): string => {
   if (report.evidence?.requests?.length) lines.push('— requests:', ...report.evidence.requests.map((l) => `    ${l}`));
   if (report.evidence?.why) lines.push('— why:', ...report.evidence.why.split('\n').map((l) => `    ${l}`));
   return lines.join('\n');
+};
+
+/** The share of the machine's CPU that sat idle over the next 300 ms. */
+const idleShare = async (): Promise<number> => {
+  const total = () =>
+    os.cpus().reduce(
+      (sum, cpu) => {
+        const t = cpu.times;
+        return { idle: sum.idle + t.idle, all: sum.all + t.idle + t.user + t.sys + t.nice + t.irq };
+      },
+      { idle: 0, all: 0 },
+    );
+  const before = total();
+  await new Promise((r) => setTimeout(r, 300));
+  const after = total();
+  return after.all > before.all ? (after.idle - before.idle) / (after.all - before.all) : 1;
 };
 
 /** The case files named, or every case under the cases directory; a sentence when there are none. */
@@ -206,8 +223,9 @@ export const caseCommands = [
     positionals: [{ name: 'files', help: 'case files, in the order they will run (default: every .md under cases.dir)', rest: true }],
     flags: {
       prepared: { type: 'string', help: 'where to leave the setups (emptied first)', value: 'dir', default: '.lynkeus/prepared' },
-      jobs: { type: 'number', help: 'setups made at once', value: 'n', default: 2 },
-      ahead: { type: 'number', help: 'setups kept ready and not yet taken, at most', value: 'n', default: 6 },
+      jobs: { type: 'number', help: 'setups made at once', value: 'n', default: 1 },
+      ahead: { type: 'number', help: 'setups kept ready and not yet taken, at most', value: 'n', default: 4 },
+      idle: { type: 'number', help: 'start a setup only while at least this share of the CPU is idle (0 to 1)', value: 'share', default: 0.25 },
     },
     needs: 'nothing',
     session: false,
@@ -222,7 +240,8 @@ export const caseCommands = [
       const cases = files.flatMap(readCases).filter((c) => preparable(c, config));
       const ahead = new Ahead(path.resolve(ctx.root, String(ctx.flags.prepared ?? '.lynkeus/prepared')));
       ahead.clear();
-      const limit = Math.max(1, Number(ctx.flags.ahead ?? 6));
+      const limit = Math.max(1, Number(ctx.flags.ahead ?? 4));
+      const idle = Number(ctx.flags.idle ?? 0.25);
       let next = 0;
       let made = 0;
       let skipped = 0;
@@ -231,8 +250,9 @@ export const caseCommands = [
         await fixtures.ahead();
         try {
           for (let c = cases[next++]; c; c = cases[next++]) {
-            // Far enough ahead: made too early, a setup only takes the machine from the cases running now.
-            while (ahead.waiting() >= limit && !ahead.started(c)) await new Promise((r) => setTimeout(r, 100));
+            // Far enough ahead, or the machine busy: a setup made then only takes the CPU from the cases
+            // running now, and the suite gains nothing from having it early.
+            while (!ahead.started(c) && (ahead.waiting() >= limit || (await idleShare()) < idle));
             if (ahead.started(c)) {
               skipped++;
               continue;
