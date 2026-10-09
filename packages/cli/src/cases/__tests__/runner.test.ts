@@ -357,3 +357,29 @@ steps:
     ['passed', 'skipped'],
   );
 });
+
+test('a host that keeps its own clock is not a device', async () => {
+  const c = parseCase(
+    `---
+id: clock
+title: device steps
+---
+steps:
+  - on: device
+    do:
+      - app.see: { text: "never shown" }
+  - on: headless
+    do:
+      - app.see: { text: "Hello" }
+`,
+    'clock.md',
+  );
+  const { base } = fakeApp();
+  const device = await base.device();
+  (device as unknown as { server: { hello: unknown } }).server.hello = { native: true, commands: ['clock'] };
+  const report = await runCase(c, { base, config, fixtures });
+  assert.deepEqual(
+    report.steps.map((s) => s.status),
+    ['skipped', 'passed'],
+  );
+});

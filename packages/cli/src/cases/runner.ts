@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 
 import type { Element, Screen, Target, TraceEvent } from 'lynkeus-protocol';
 
-import { describeScreen } from '../device/driver.js';
+import { type Device, describeScreen } from '../device/driver.js';
 import { type AppEvent, normalizeEvents, type RunEvent } from '../knowledge/events.js';
 import { type Base, type Command, find } from '../registry.js';
 import { execute } from '../runtime.js';
@@ -466,13 +466,10 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     }
   };
 
-  // Nobody acts on a screen that is still asking for what it shows: a press
-  // that lands before the data does is a different case from the one written.
-  const ready = async () => {
-    const d = await device();
-    const deadline = Date.now() + 5000;
-    while ((await d.screen()).busy && Date.now() < deadline) await d.idle({ quietMs: 50, timeoutMs: 200 }).catch(() => undefined);
-  };
+  // A host that keeps its own clock lets an animation finish before it answers. A phone runs on the
+  // wall's and keeps moving after the last render, so only there is a pause worth its time; and a case's
+  // `on: device` steps are written for that phone.
+  const onWallClock = (d: Device) => !!d.server.hello?.native && !d.server.hello.commands?.includes('clock');
 
   let handling = false;
   const interrupted = async (value: StepValue): Promise<void> => {
@@ -503,7 +500,6 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     switch (name) {
       case 'press': {
         await interrupted(value);
-        await ready();
         const outcome = await press(value);
         // One touch, one render: the next step reads what this one caused.
         await d.idle({ quietMs: 50, timeoutMs: 400 }).catch(() => undefined);
@@ -512,10 +508,9 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       case 'type':
       case 'swipe':
         await interrupted(value);
-        await ready();
         await cli(argvFor(find(name)!, value));
         // A pager on a device keeps moving after the finger lifts, and swallows a swipe sent into that momentum.
-        if (name === 'swipe' && d.server.hello?.native) await d.idle({ quietMs: 700, timeoutMs: 8000 }).catch(() => undefined);
+        if (name === 'swipe' && onWallClock(d)) await d.idle({ quietMs: 700, timeoutMs: 8000 }).catch(() => undefined);
         return undefined;
       case 'see':
         await see(value);
@@ -543,7 +538,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
           } else await cli(argvFor(find('wait')!, value));
           // A screen that just arrived on a device is still sliding in, which no render shows: a press then lands on the one it left.
           const what = typeof value === 'string' ? value : String(params?.what ?? '');
-          if (d.server.hello?.native && isRoute(what)) await d.idle({ quietMs: 700, timeoutMs: 8000 }).catch(() => undefined);
+          if (onWallClock(d) && isRoute(what)) await d.idle({ quietMs: 700, timeoutMs: 8000 }).catch(() => undefined);
         }
         return undefined;
       }
@@ -620,9 +615,9 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
   const runsHere = async (on: string): Promise<boolean> => {
     if (on.startsWith('!')) return !(await runsHere(on.slice(1)));
     const hello = (await device()).server.hello;
-    const native = !!hello?.native;
-    if (on === 'device') return native;
-    if (on === 'headless') return !native;
+    const phone = onWallClock(await device());
+    if (on === 'device') return phone;
+    if (on === 'headless') return !phone;
     if (on.startsWith('has:')) return !!hello?.commands?.includes(on.slice(4));
     return hello?.platform === on;
   };
