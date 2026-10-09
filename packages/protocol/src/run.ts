@@ -62,6 +62,8 @@ export type RunCase = {
   startedAt: string;
   ms: number;
   steps: RunStep[];
+  /** Why it failed, as rules read off the screen, the requests and the trace. */
+  diagnosis?: string[];
   /** When a step failed: the screen, the requests since the case began, and why. */
   evidence?: { screen?: string; requests?: string[]; why?: string };
   /** The case's film, relative to the run directory. */

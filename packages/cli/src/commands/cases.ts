@@ -8,6 +8,7 @@ import { type CaseReport, missingFixtures, runCase } from '../cases/runner.js';
 import { CONFIG, EXAMPLE_CASE, FIXTURES, FORMAT } from '../cases/templates.js';
 import { configFile } from '../config.js';
 import { readJson, writeJson } from '../files.js';
+import { Flakes } from '../cases/flakes.js';
 import { RunFile } from '../cases/runfile.js';
 import { eventsFile } from '../knowledge/events.js';
 import { define } from '../registry.js';
@@ -75,6 +76,10 @@ export const caseCommands = [
       report: { type: 'string', help: 'append one JSON line per case', value: 'file' },
       events: { type: 'string', help: 'keep what the app told its analytics, per case, as <dir>/<case id>/events.jsonl', value: 'dir' },
       out: { type: 'string', help: 'write the run as a directory a report can read: run.json and cases.jsonl, a line per attempt', value: 'dir' },
+      screenshots: { type: 'boolean', help: 'with --out: a frame of the screen after every step of the app' },
+      video: { type: 'boolean', help: 'with --out: film each case, where the host films (the step says at what second it began)' },
+      'video-fps': { type: 'number', help: 'frames per second of the film', default: 30, value: 'n' },
+      flakes: { type: 'string', help: 'the ledger of how each case did across runs (default .lynkeus/flakes.json)', value: 'file' },
       'dry-run': { type: 'boolean', help: 'parse and list the steps without running them' },
     },
     needs: 'nothing',
@@ -97,6 +102,17 @@ export const caseCommands = [
       const cases = files.flatMap(readCases);
       const dry = !!ctx.flags['dry-run'];
       const out = typeof ctx.flags.out === 'string' && !dry ? new RunFile(path.resolve(ctx.flags.out), ctx.root) : undefined;
+      if ((ctx.flags.screenshots || ctx.flags.video) && !out)
+        return { text: '--screenshots and --video keep what they take in the run directory: add --out <dir>', code: 2 };
+      const evidenceOf = (id: string, attempt: number) =>
+        out && (ctx.flags.screenshots || ctx.flags.video)
+          ? {
+              dir: out.evidenceDir(id, attempt),
+              screenshots: !!ctx.flags.screenshots,
+              ...(ctx.flags.video ? { video: { fps: Number(ctx.flags['video-fps'] ?? 30) } } : {}),
+            }
+          : undefined;
+      const ledger = dry ? undefined : new Flakes(path.resolve(ctx.root, typeof ctx.flags.flakes === 'string' ? ctx.flags.flakes : '.lynkeus/flakes.json'));
       // A run file files each event under its step, so it needs them collected.
       const events = typeof ctx.flags.events === 'string' || out !== undefined;
       const host = ctx.flags.host && !dry ? await startHost(ctx.root, ctx.err) : undefined;
@@ -122,16 +138,25 @@ export const caseCommands = [
         for (const c of cases) {
           ctx.err(`▶ ${c.id}${c.title ? ` — ${c.title}` : ''}`);
           let startedAt = new Date();
-          let report: CaseReport & { retried?: boolean } = await runCase(c, { base: ctx, config, fixtures, dry, events, log: ctx.err });
+          let report: CaseReport & { retried?: boolean } = await runCase(c, {
+            base: ctx,
+            config,
+            fixtures,
+            dry,
+            events,
+            evidence: evidenceOf(c.id, 1),
+            log: ctx.err,
+          });
           ctx.err(describe(report));
           out?.add(c, { report, attempt: 1, startedAt });
           if (report.result === 'failed' && !ctx.flags.once && !dry) {
             ctx.err(`  retrying ${c.id} once`);
             startedAt = new Date();
-            report = { ...(await runCase(c, { base: ctx, config, fixtures, events, log: ctx.err })), retried: true };
+            report = { ...(await runCase(c, { base: ctx, config, fixtures, events, evidence: evidenceOf(c.id, 2), log: ctx.err })), retried: true };
             ctx.err(describe(report));
             out?.add(c, { report, attempt: 2, startedAt });
           }
+          ledger?.note(report);
           if (typeof ctx.flags.events === 'string' && report.events) {
             const out = path.resolve(ctx.flags.events as string, c.id);
             fs.mkdirSync(out, { recursive: true });
@@ -154,7 +179,9 @@ export const caseCommands = [
           (r) => `${{ passed: '✅', failed: '❌', unsupported: '🚫' }[r.result]} ${r.id}${r.retried && r.result === 'passed' ? '  ⚠ passed on retry' : ''}`,
         ),
         `${count('passed')}/${reports.length} passed${unsupported ? `, ${unsupported} cannot run on this host` : ''}`,
+        ...(ledger ? ledger.flaky(reports.map((r) => r.id)) : []),
       ].join('\n');
+      ledger?.save();
       // A case this host cannot run is not a failure of the app; only a failed case fails the run.
       return { text: summary, json: reports, code: count('failed') === 0 ? 0 : 1 };
     },

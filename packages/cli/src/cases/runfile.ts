@@ -13,29 +13,31 @@ import type { CaseReport } from './runner.js';
 
 export type Attempt = { report: CaseReport; attempt: number; startedAt: Date };
 
-export const toRunCase = (c: Case, { report, attempt, startedAt }: Attempt, root: string): RunCase => {
+/** Paths in the run file are relative to its directory, so the directory can move. */
+const within = (dir: string | undefined, file: string | undefined) => (file ? (dir ? path.relative(dir, file) : file) : undefined);
+
+export const toRunCase = (c: Case, { report, attempt, startedAt }: Attempt, root: string, dir?: string): RunCase => {
   const steps: RunStep[] = report.steps.map((s, index) => {
     // The runner numbers an event's step from 1, in the order the steps ran.
-    const events = (report.events ?? []).filter((e) => e.step === index + 1);
+    const told = (report.events ?? [])
+      .filter((e) => e.step === index + 1)
+      .map((e) => ({ origin: 'app' as const, name: e.name, ...(e.props ? { props: e.props } : {}), ...(e.route ? { route: e.route } : {}) }));
+    const sent = (s.sent ?? []).map((e) => ({ origin: 'app' as const, provider: e.provider, name: e.name, ...(e.props ? { props: e.props } : {}) }));
+    const events = [...told, ...sent];
+    const screenshot = within(dir, s.screenshot);
     return {
       step: s.step,
       status: s.status,
       ms: s.ms,
       ...(s.error ? { error: s.error } : {}),
       section: index < c.setup.length ? 'setup' : 'steps',
-      ...(events.length > 0
-        ? {
-            events: events.map((e) => ({
-              origin: 'app' as const,
-              name: e.name,
-              ...(e.props ? { props: e.props } : {}),
-              ...(e.route ? { route: e.route } : {}),
-            })),
-          }
-        : {}),
+      ...(events.length > 0 ? { events } : {}),
+      ...(screenshot ? { screenshot } : {}),
+      ...(s.videoS !== undefined ? { videoS: s.videoS } : {}),
     };
   });
   const description = typeof c.meta.description === 'string' ? c.meta.description : undefined;
+  const video = within(dir, report.video);
   return {
     id: report.id,
     ...(report.title ? { title: report.title } : {}),
@@ -46,7 +48,9 @@ export const toRunCase = (c: Case, { report, attempt, startedAt }: Attempt, root
     startedAt: startedAt.toISOString(),
     ms: report.ms,
     steps,
+    ...(report.diagnosis ? { diagnosis: report.diagnosis } : {}),
     ...(report.evidence ? { evidence: report.evidence } : {}),
+    ...(video ? { video } : {}),
   };
 };
 
@@ -65,8 +69,13 @@ export class RunFile {
     this.save();
   }
 
+  /** Where a case's frames and film go: one folder per attempt. */
+  evidenceDir(id: string, attempt: number): string {
+    return path.join(this.dir, `${id.replace(/[^\w.=-]+/g, '_')}${attempt > 1 ? `.${attempt}` : ''}`);
+  }
+
   add(c: Case, attempt: Attempt): void {
-    const line = toRunCase(c, attempt, this.root);
+    const line = toRunCase(c, attempt, this.root, this.dir);
     fs.appendFileSync(path.join(this.dir, 'cases.jsonl'), `${JSON.stringify(line)}\n`);
     this.last.set(line.id, { result: line.result, attempt: line.attempt });
   }
