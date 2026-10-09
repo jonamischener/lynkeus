@@ -5,6 +5,7 @@
  * logs in or what a user is belongs to the project, as macros and fixtures.
  */
 import { exec } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -37,8 +38,22 @@ export type CasesConfig = {
   interruptions?: { see: string; do: unknown[]; unless?: string }[];
 };
 
+/** What a host's analytics capture saw a step send: the SDK it went to and the event. */
+export type SentEvent = { provider: string; name: string; props?: Record<string, unknown> };
+
 /** `unsupported`: the host the case ran on has no such thing to do (a real device has no mocked responses), which says nothing about the app. */
-export type StepReport = { step: string; status: 'passed' | 'failed' | 'skipped' | 'unsupported'; ms: number; error?: string };
+export type StepReport = {
+  step: string;
+  status: 'passed' | 'failed' | 'skipped' | 'unsupported';
+  ms: number;
+  error?: string;
+  /** A frame of the screen once the step was done, an absolute path. */
+  screenshot?: string;
+  /** The second of the case's film at which the step began. */
+  videoS?: number;
+  /** What the step made the app send its analytics SDKs, where the host captures them. */
+  sent?: SentEvent[];
+};
 export type CaseReport = {
   id: string;
   title?: string;
@@ -51,9 +66,24 @@ export type CaseReport = {
   evidence?: { screen?: string; requests?: string[]; why?: string };
   /** What the app told its analytics, each with the step that caused it, when the run asked for it. */
   events?: RunEvent[];
+  /** The case's film, an absolute path, where the host films. */
+  video?: string;
+  /** Why it failed, read as rules from the screen, the requests and the trace (`lynkeus why`). */
+  diagnosis?: string[];
 };
 
-export type RunOptions = { base: Base; config: CasesConfig; fixtures?: Fixtures; dry?: boolean; events?: boolean; log?: (line: string) => void };
+/** Where a case keeps what it can show of itself: a frame per step, a film. Each is taken only where the host can. */
+export type Evidence = { dir: string; screenshots?: boolean; video?: { fps: number } };
+
+export type RunOptions = {
+  base: Base;
+  config: CasesConfig;
+  fixtures?: Fixtures;
+  dry?: boolean;
+  events?: boolean;
+  evidence?: Evidence;
+  log?: (line: string) => void;
+};
 
 /** What a buffer holds that it did not before, whichever end it grows from. */
 export const newSince = (before: AppEvent[], now: AppEvent[]): AppEvent[] => {
@@ -243,13 +273,24 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     for (const field of Object.values(config.refs ?? {})) if (answer[field] !== undefined) latest[field] = answer[field];
   };
 
+  // What the backend answered, until a step that can change it.
+  const inspected = new Map<string, Record<string, unknown>>();
+
   const assert = async (value: StepValue): Promise<void> => {
     const params = (value ?? {}) as Record<string, unknown>;
     const matcher = matcherOf(params);
     if (!matcher || typeof params.path !== 'string') throw new Error('assert needs a path and a matcher (equals, includes, gte, …)');
     if (!options.fixtures) throw new Error('assert reads the backend through fixtures, and the project declares none');
     const rest = Object.fromEntries(Object.entries(params).filter(([k]) => k !== 'path' && !(k in matcher)));
-    const answer = await options.fixtures.call(config.inspect ?? 'inspect', withRefs(rest));
+    // `section` is the part of the answer the path reads: a server that works its answer out part by part
+    // need only do that part. Asserts in a row on the same section read one answer.
+    const ask = withRefs({ ...rest, section: params.path.split('.')[0] });
+    const key = JSON.stringify(ask);
+    let answer = inspected.get(key);
+    if (!answer) {
+      answer = await options.fixtures.call(config.inspect ?? 'inspect', ask);
+      inspected.set(key, answer);
+    }
     const got = dig(answer, params.path);
     if (!matches(got, matcher)) throw new Error(`${params.path} is ${JSON.stringify(got)}`);
   };
@@ -589,6 +630,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
   const perform = async (step: Step): Promise<'skipped' | undefined> => {
     if (step.on && !(await runsHere(step.on))) return 'skipped';
     ran.add(step.verb);
+    if (!['assert', 'app.see', 'app.wait'].includes(step.verb)) inspected.clear();
     const value = interpolate(step.value, scope);
     const custom = config.macros?.[step.verb];
     if (custom) {
@@ -606,6 +648,58 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     if (d?.server.connected) buffer = normalizeEvents(await d.command('events').catch(() => []));
   }
 
+  const evidence = options.dry ? undefined : options.evidence;
+  const offers = async (command: string) => !!(await base.device().catch(() => undefined))?.server.hello?.commands?.includes(command);
+  const film = evidence?.video && (await offers('record')) ? path.join(evidence.dir, 'video.mp4') : undefined;
+  // Asked only when the run keeps events: it is a call per step.
+  const capturing = !options.dry && !!options.events && (await offers('analytics'));
+  if (evidence) fs.mkdirSync(evidence.dir, { recursive: true });
+  let filming = false;
+  if (film && evidence?.video) {
+    const d = await device();
+    filming = await d.command('record', { path: film, fps: evidence.video.fps }).then(
+      () => true,
+      () => false,
+    );
+  }
+  // What the app sent before the case began is not the case's.
+  if (capturing) await (await device()).command('analytics', { take: true }).catch(() => undefined);
+  const frameAt = async (): Promise<number | undefined> => {
+    if (!filming || !evidence?.video) return undefined;
+    const answer = (await (await device()).command('record', { frames: true }).catch(() => undefined)) as { frames?: number } | undefined;
+    return typeof answer?.frames === 'number' ? Math.round((answer.frames / evidence.video.fps) * 100) / 100 : undefined;
+  };
+  // What a step leaves for a report: the frame after it and what it sent. Nothing here may fail the case.
+  const record = async (report: StepReport, index: number, startedAt: number | undefined) => {
+    if (startedAt !== undefined) report.videoS = startedAt;
+    const d = await device().catch(() => undefined);
+    if (!d?.server.connected) return;
+    if (capturing) {
+      const raw = (await d.command('analytics', { take: true }).catch(() => [])) as { sdk?: string; name?: string; properties?: Record<string, unknown> }[];
+      const sent = (Array.isArray(raw) ? raw : []).flatMap((e) =>
+        e?.name ? [{ provider: String(e.sdk ?? 'unknown'), name: String(e.name), ...(e.properties ? { props: e.properties } : {}) }] : [],
+      );
+      if (sent.length > 0) report.sent = sent;
+    }
+    if (evidence?.screenshots) {
+      const file = path.join(
+        evidence.dir,
+        `${String(index).padStart(2, '0')}-${report.step
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .slice(0, 48)
+          .replace(/^-|-$/g, '')}.png`,
+      );
+      const taken = (await offers('screenshot'))
+        ? await d.command('screenshot', { path: file }).then(
+            () => true,
+            () => false,
+          )
+        : (await execute(['screenshot', file], base)).code === 0;
+      if (taken && fs.existsSync(file)) report.screenshot = file;
+    }
+  };
+
   let failed = false;
   let unsupported = false;
   for (const step of [...c.setup, ...c.steps]) {
@@ -621,11 +715,15 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       continue;
     }
     const t0 = Date.now();
+    const at = step.verb.startsWith('app.') || config.macros?.[step.verb] ? await frameAt() : undefined;
     try {
       const outcome = await perform(step);
       if (step.verb.startsWith('app.') || config.macros?.[step.verb]) await collect(steps.length + 1);
-      steps.push({ step: text, status: outcome === 'skipped' ? 'skipped' : 'passed', ms: Date.now() - t0 });
+      const done: StepReport = { step: text, status: outcome === 'skipped' ? 'skipped' : 'passed', ms: Date.now() - t0 };
+      steps.push(done);
       log(`  ${outcome === 'skipped' ? '⏭️' : '✅'} ${text}  (${Date.now() - t0}ms)`);
+      if ((evidence || capturing) && outcome !== 'skipped' && (step.verb.startsWith('app.') || config.macros?.[step.verb]))
+        await record(done, steps.length, at);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const missing = lacking(message);
@@ -637,8 +735,10 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
         continue;
       }
       failed = true;
-      steps.push({ step: text, status: 'failed', ms: Date.now() - t0, error: message });
+      const broke: StepReport = { step: text, status: 'failed', ms: Date.now() - t0, error: message };
+      steps.push(broke);
       log(`  ❌ ${text}  — ${message.split('\n')[0]}  (${Date.now() - t0}ms)`);
+      if (evidence || capturing) await record(broke, steps.length, at);
     }
   }
 
@@ -652,8 +752,14 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     steps,
   };
   if (options.events) report.events = recorded;
+  if (filming) {
+    await (await device()).command('record', { stop: true }).catch(() => undefined);
+    if (film && fs.existsSync(film)) report.video = film;
+  }
   if (failed && !options.dry) {
     const d = await device().catch(() => undefined);
+    // A step that failed on its own reading of the screen left no reasons; ask for them.
+    if (!why && d?.server.connected) why = (await execute(['why'], base).catch(() => undefined))?.text || undefined;
     if (d?.server.connected) {
       const screen = await d.screen().catch(() => undefined);
       const events = await d.trace(mark).catch(() => undefined);
@@ -663,6 +769,11 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
         why,
       };
     }
+    const reasons = (why ?? '')
+      .split('\n')
+      .map((l) => l.replace(/^\s*•\s*/, '').trim())
+      .filter((l) => l.length > 0);
+    if (reasons.length > 0) report.diagnosis = reasons;
   }
   return report;
 };
