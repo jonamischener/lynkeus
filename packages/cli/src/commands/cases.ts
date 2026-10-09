@@ -157,6 +157,7 @@ export const caseCommands = [
       try {
         // A case that names a fixture the server does not have fails halfway, after it has changed the backend. Better not to start.
         const described = await fixtures?.describe();
+        if (described?.down) return { text: `the fixtures server cannot serve: ${described.down}`, code: 1 };
         if (described) {
           const missing = cases.flatMap((c) => missingFixtures(c, config, described.commands).map((name) => `${c.id}: no fixture ${name}`));
           if (missing.length > 0) return { text: [...missing, `the fixtures command answers: ${described.commands.join(', ')}`].join('\n'), code: 1 };
@@ -238,6 +239,9 @@ export const caseCommands = [
       const files = caseFiles(ctx.args, home, config.dir);
       if (typeof files === 'string') return { text: files, code: 1 };
       const cases = files.flatMap(readCases).filter((c) => preparable(c, config));
+      const probe = new Fixtures(declared, home);
+      const described = await probe.describe().finally(() => probe.close());
+      if (described?.down) return { text: `the fixtures server cannot serve: ${described.down}`, code: 1 };
       const ahead = new Ahead(path.resolve(ctx.root, String(ctx.flags.prepared ?? '.lynkeus/prepared')));
       ahead.clear();
       const limit = Math.max(1, Number(ctx.flags.ahead ?? 4));
