@@ -29,6 +29,8 @@ export type Base = {
   err: (line: string) => void;
   /** Inside `lynkeus session` and over MCP: one connection, many commands. */
   attached: boolean;
+  /** The same, but waiting for its app on another port: one per host when several run side by side. */
+  forPort?: (port: number) => { base: Base; stop: () => Promise<void> };
 };
 
 export type Ctx = Base & { args: string[]; flags: FlagValues; passthrough: string[] };

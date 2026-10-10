@@ -431,6 +431,9 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     if (!target) throw new Error('app.press needs a target');
     const d = await device();
     if (params.optional === true) {
+      // Decided once the app has gone quiet: what it presses (a one-time question, a promo) arrives a moment
+      // after the screen before it, and a fast host gets here first.
+      await d.idle({ quietMs: 150, timeoutMs: 1000 }).catch(() => undefined);
       const there = await d.waitFor({ target, timeoutMs: 300 }).then(
         () => true,
         () => false,
@@ -448,9 +451,14 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     // so a host with its own clock moves it on instead of standing still while this one sleeps.
     const deadline = Date.now() + (typeof params.timeoutMs === 'number' ? params.timeoutMs : 3000);
     const hard = Date.now() + 15_000;
+    let was: string | undefined;
     while (Date.now() < hard && 'testId' in target) {
       const found = (await d.server.call('find', target)) as Element | null;
-      if (found?.enabled) break;
+      // Covered or still moving is often for a moment (a screen or button sliding in, a sheet still
+      // closing), and a press then lands on whatever covers it or where the control no longer is.
+      const at = found ? JSON.stringify(found.frame) : undefined;
+      if (found?.enabled && !found.covered && at === was) break;
+      was = at;
       if (Date.now() > deadline && !(await d.screen()).busy) break;
       await d.idle({ quietMs: 50, timeoutMs: 200 }).catch(() => undefined);
     }

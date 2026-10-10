@@ -37,7 +37,7 @@ const globals = (argv: string[]) => {
 
 export type Session = { ctx: Base; stop: () => Promise<void> };
 
-const contextFor = (argv: string[], attached = false): Session => {
+const contextFor = (argv: string[], attached = false, port?: number): Session => {
   const g = globals(argv);
   const root = path.resolve((g.root as string | undefined) ?? process.cwd());
   const config = loadConfig(root);
@@ -49,7 +49,7 @@ const contextFor = (argv: string[], attached = false): Session => {
     const appId = (g.app as string | undefined) ?? process.env.LYNKEUS_APP_ID ?? config.app;
     const started = performance.now();
     const attachedIn = (d: Device) => err(`attached in ${Math.round(performance.now() - started)}ms (${d.info.name})`);
-    const server = new AgentServer({ token: process.env.LYNKEUS_TOKEN, port: portFromEnv(config) });
+    const server = new AgentServer({ token: process.env.LYNKEUS_TOKEN, port: port ?? portFromEnv(config) });
     const picking = pickAgentDevice((g.device as string | undefined) ?? process.env.LYNKEUS_DEVICE ?? config.device);
     if (g.launch && appId) {
       const d = new Device(await picking, { appId, server });
@@ -91,6 +91,10 @@ const contextFor = (argv: string[], attached = false): Session => {
     device: () => {
       device ??= connect();
       return device;
+    },
+    forPort: (other) => {
+      const scoped = contextFor(argv, attached, other);
+      return { base: scoped.ctx, stop: scoped.stop };
     },
   };
   return {

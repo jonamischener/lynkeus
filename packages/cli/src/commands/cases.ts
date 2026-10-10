@@ -5,15 +5,16 @@ import path from 'node:path';
 
 import { Fixtures } from '../cases/fixtures.js';
 import { readCases } from '../cases/format.js';
-import { type CaseReport, missingFixtures, preparable, runCase } from '../cases/runner.js';
+import type { Case } from '../cases/format.js';
+import { type CasesConfig, type CaseReport, missingFixtures, type Prepared, preparable, runCase } from '../cases/runner.js';
 import { CONFIG, EXAMPLE_CASE, FIXTURES, FORMAT } from '../cases/templates.js';
 import { configFile } from '../config.js';
 import { readJson, writeJson } from '../files.js';
-import { Ahead } from '../cases/ahead.js';
+import { Ahead, InMemory, type Store } from '../cases/ahead.js';
 import { Flakes } from '../cases/flakes.js';
 import { RunFile } from '../cases/runfile.js';
 import { eventsFile } from '../knowledge/events.js';
-import { define } from '../registry.js';
+import { type Base, define } from '../registry.js';
 
 const startHost = async (root: string, err: (line: string) => void): Promise<ChildProcess> => {
   // Its own process group: the host starts a test runner of its own, and stopping one without the other leaves an app dialing in.
@@ -49,6 +50,24 @@ const stopGroup = (pid: number) => {
   try {
     process.kill(-pid, 'SIGTERM');
   } catch {}
+};
+
+/**
+ * Stops a host and waits until it is gone. The next case's host dials the same port, and a host still on
+ * its way out dials it too: whichever reaches the driver first is the one the case talks to.
+ */
+const stopHost = async (host: ChildProcess): Promise<void> => {
+  if (!host.pid || host.exitCode !== null || host.signalCode !== null) return;
+  const gone = new Promise<void>((resolve) => host.once('exit', () => resolve()));
+  host.stdin?.end();
+  stopGroup(host.pid);
+  const late = setTimeout(() => {
+    try {
+      process.kill(-host.pid!, 'SIGKILL');
+    } catch {}
+  }, 2000);
+  await gone;
+  clearTimeout(late);
 };
 
 const describe = (report: CaseReport): string => {
@@ -95,6 +114,57 @@ const caseFiles = (args: string[], home: string, casesDir: string | undefined): 
   return files.length > 0 ? files : `no cases under ${path.relative(home, dir) || '.'}; \`lynkeus case init\` writes one`;
 };
 
+type PrepareOptions = { base: Base; config: CasesConfig; store: Store; open: () => Fixtures; limit: number; idle: number; jobs: number };
+
+/**
+ * Runs the setups of `cases` ahead of them, in order, `jobs` at a time: never more than `limit` waiting
+ * to be taken, and only while the machine has `idle` of its CPU to spare. A case that started first is skipped.
+ */
+const prepareAhead = async (cases: Case[], o: PrepareOptions): Promise<{ made: number; skipped: number }> => {
+  let next = 0;
+  let made = 0;
+  let skipped = 0;
+  // Far enough ahead, or the machine busy: a setup made then only takes the CPU from the cases
+  // running now, and the suite gains nothing from having it early.
+  const room = async (): Promise<boolean> => {
+    if (o.store.waiting() < o.limit) return (await idleShare()) >= o.idle;
+    // A timer, not a bare check: the jobs that take the waiting setups may run in this same process,
+    // and a loop that never yields to the event loop would keep them from ever taking one.
+    await new Promise((r) => setTimeout(r, 100));
+    return false;
+  };
+  const worker = async () => {
+    const fixtures = o.open();
+    await fixtures.ahead();
+    try {
+      for (let c = cases[next++]; c; c = cases[next++]) {
+        while (!o.store.started(c) && !(await room()));
+        if (o.store.started(c)) {
+          skipped++;
+          continue;
+        }
+        const done = c;
+        await runCase(done, { base: o.base, config: o.config, fixtures, setupOnly: { keep: (p) => o.store.keep(done, p) } });
+        made++;
+      }
+    } finally {
+      fixtures.close();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, o.jobs) }, worker));
+  return { made, skipped };
+};
+
+/** A host for one case, started by the project's own command: `{port}` is where it dials the driver. */
+const spawnHost = (command: string, port: number, job: number, cwd: string): ChildProcess =>
+  spawn('/bin/sh', ['-c', command.replaceAll('{port}', String(port)).replaceAll('{job}', String(job))], {
+    cwd,
+    env: process.env,
+    // stdin stays open for the host's life: a host that serves until its stdin closes stops with the case.
+    stdio: ['pipe', 'ignore', 'ignore'],
+    detached: true,
+  });
+
 export const caseCommands = [
   define({
     name: 'case run',
@@ -114,6 +184,15 @@ export const caseCommands = [
       'video-fps': { type: 'number', help: 'frames per second of the film', default: 30, value: 'n' },
       flakes: { type: 'string', help: 'the ledger of how each case did across runs (default .lynkeus/flakes.json)', value: 'file' },
       prepared: { type: 'string', help: 'where `case prepare` leaves setups made ahead; a case found there skips its setup', value: 'dir' },
+      jobs: { type: 'number', help: 'cases at once, each on its own host (needs --ports)', value: 'n', default: 1 },
+      ports: { type: 'string', help: 'the driver port of each job, comma-separated: where its host dials in', value: 'list' },
+      'host-command': {
+        type: 'string',
+        help: 'starts a fresh host for every case and stops it after; {port} is where the host dials, {job} the job',
+        value: 'command',
+      },
+      ahead: { type: 'number', help: 'make up to this many setups ahead of their cases while others run (0: none)', value: 'n', default: 0 },
+      idle: { type: 'number', help: 'with --ahead: start a setup only while this share of the CPU is idle', value: 'share', default: 0.25 },
       'dry-run': { type: 'boolean', help: 'parse and list the steps without running them' },
     },
     needs: 'nothing',
@@ -137,7 +216,6 @@ export const caseCommands = [
               ...(ctx.flags.video ? { video: { fps: Number(ctx.flags['video-fps'] ?? 30) } } : {}),
             }
           : undefined;
-      const ahead = typeof ctx.flags.prepared === 'string' && !dry ? new Ahead(path.resolve(ctx.flags.prepared)) : undefined;
       const ledger = dry ? undefined : new Flakes(path.resolve(ctx.root, typeof ctx.flags.flakes === 'string' ? ctx.flags.flakes : '.lynkeus/flakes.json'));
       // A run file files each event under its step, so it needs them collected.
       const events = typeof ctx.flags.events === 'string' || out !== undefined;
@@ -162,42 +240,95 @@ export const caseCommands = [
           const missing = cases.flatMap((c) => missingFixtures(c, config, described.commands).map((name) => `${c.id}: no fixture ${name}`));
           if (missing.length > 0) return { text: [...missing, `the fixtures command answers: ${described.commands.join(', ')}`].join('\n'), code: 1 };
         }
-        for (const c of cases) {
-          ctx.err(`▶ ${c.id}${c.title ? ` — ${c.title}` : ''}`);
-          let startedAt = new Date();
-          ahead?.start(c);
-          let report: CaseReport & { retried?: boolean } = await runCase(c, {
-            base: ctx,
-            config,
-            fixtures,
-            dry,
-            events,
-            evidence: evidenceOf(c.id, 1),
-            log: ctx.err,
-            prepared: ahead?.take(c),
-          });
-          ctx.err(describe(report));
-          out?.add(c, { report, attempt: 1, startedAt });
-          if (report.result === 'failed' && !ctx.flags.once && !dry) {
-            ctx.err(`  retrying ${c.id} once`);
-            startedAt = new Date();
-            report = { ...(await runCase(c, { base: ctx, config, fixtures, events, evidence: evidenceOf(c.id, 2), log: ctx.err })), retried: true };
-            ctx.err(describe(report));
-            out?.add(c, { report, attempt: 2, startedAt });
+        const jobs = Math.max(1, Number(ctx.flags.jobs ?? 1));
+        const ports = typeof ctx.flags.ports === 'string' ? ctx.flags.ports.split(',').map(Number) : [];
+        const hostCommand = typeof ctx.flags['host-command'] === 'string' && !dry ? ctx.flags['host-command'] : undefined;
+        if ((jobs > 1 || hostCommand) && (ports.length < jobs || ports.some((p) => !Number.isInteger(p)) || !ctx.forPort))
+          return { text: `--jobs and --host-command need a driver port per job: --ports with ${jobs}`, code: 2 };
+        const limit = Number(ctx.flags.ahead ?? 0);
+        const store: Store | undefined =
+          typeof ctx.flags.prepared === 'string' && !dry ? new Ahead(path.resolve(ctx.flags.prepared)) : limit > 0 && fixtures ? new InMemory() : undefined;
+        const declared = config.fixtures;
+        // The setups of the cases to come, made while these run, in the order the jobs will take them.
+        const preparing =
+          limit > 0 && declared && store && !dry
+            ? prepareAhead(
+                cases.filter((c) => preparable(c, config)),
+                {
+                  base: ctx,
+                  config,
+                  store,
+                  open: () => new Fixtures(declared, home),
+                  limit,
+                  idle: Number(ctx.flags.idle ?? 0.25),
+                  jobs: 1,
+                },
+              )
+            : undefined;
+        let next = 0;
+        const job = async (index: number) => {
+          // Each job keeps its own connection to the fixtures server, warm from one case to the next.
+          const own = index === 0 ? fixtures : declared && !dry ? new Fixtures(declared, home) : undefined;
+          const port = ports[index];
+          try {
+            for (let c = cases[next++]; c; c = cases[next++]) {
+              const lines: string[] = [];
+              // With several jobs a case's lines are held and printed together, not interleaved.
+              const log = jobs > 1 ? (line: string) => lines.push(line) : ctx.err;
+              log(`▶ ${c.id}${c.title ? ` — ${c.title}` : ''}`);
+              store?.start(c);
+              const attempt = async (n: number, prepared?: Prepared) => {
+                const host = hostCommand && port !== undefined ? spawnHost(hostCommand, port, index, ctx.root) : undefined;
+                const scoped = port !== undefined && ctx.forPort ? ctx.forPort(port) : { base: ctx as Base, stop: async () => undefined };
+                const startedAt = new Date();
+                try {
+                  // A host just started is still drawing its first screens; with the setup made ahead nothing
+                  // else gives it that moment before the first press.
+                  if (host) await (await scoped.base.device()).idle({ quietMs: 300, timeoutMs: 5000 }).catch(() => undefined);
+                  const report = await runCase(c, { base: scoped.base, config, fixtures: own, dry, events, evidence: evidenceOf(c.id, n), log, prepared });
+                  return { report, startedAt, hello: (await scoped.base.device().catch(() => undefined))?.server.hello ?? undefined };
+                } finally {
+                  if (host) await stopHost(host);
+                  await scoped.stop();
+                }
+              };
+              let {
+                report,
+                startedAt,
+                hello,
+              }: { report: CaseReport & { retried?: boolean }; startedAt: Date; hello?: { platform?: string; native?: boolean } } = await attempt(
+                1,
+                store?.take(c),
+              );
+              seen ??= hello;
+              log(describe(report));
+              out?.add(c, { report, attempt: 1, startedAt });
+              if (report.result === 'failed' && !ctx.flags.once && !dry) {
+                log(`  retrying ${c.id} once`);
+                const again = await attempt(2);
+                report = { ...again.report, retried: true };
+                startedAt = again.startedAt;
+                log(describe(report));
+                out?.add(c, { report, attempt: 2, startedAt });
+              }
+              if (jobs > 1) ctx.err(lines.join('\n'));
+              ledger?.note(report);
+              if (typeof ctx.flags.events === 'string' && report.events) {
+                const dir = path.resolve(ctx.flags.events as string, c.id);
+                fs.mkdirSync(dir, { recursive: true });
+                fs.writeFileSync(eventsFile(dir), report.events.map((e) => `${JSON.stringify(e)}\n`).join(''));
+              }
+              reports.push(report);
+              if (ctx.flags.report) fs.appendFileSync(path.resolve(ctx.flags.report as string), `${JSON.stringify(report)}\n`);
+            }
+          } finally {
+            if (own !== fixtures) own?.close();
           }
-          ledger?.note(report);
-          if (typeof ctx.flags.events === 'string' && report.events) {
-            const out = path.resolve(ctx.flags.events as string, c.id);
-            fs.mkdirSync(out, { recursive: true });
-            fs.writeFileSync(eventsFile(out), report.events.map((e) => `${JSON.stringify(e)}\n`).join(''));
-          }
-          reports.push(report);
-          if (ctx.flags.report) fs.appendFileSync(path.resolve(ctx.flags.report as string), `${JSON.stringify(report)}\n`);
-        }
-        if (out) {
-          const hello = (await ctx.device().catch(() => undefined))?.server.hello;
-          out.finish({ platform: hello?.platform, native: hello?.native });
-        }
+        };
+        let seen: { platform?: string; native?: boolean } | undefined;
+        await Promise.all(Array.from({ length: jobs }, (_, i) => job(i)));
+        await preparing;
+        if (out) out.finish({ platform: seen?.platform, native: seen?.native });
       } finally {
         stop();
       }
@@ -242,34 +373,17 @@ export const caseCommands = [
       const probe = new Fixtures(declared, home);
       const described = await probe.describe().finally(() => probe.close());
       if (described?.down) return { text: `the fixtures server cannot serve: ${described.down}`, code: 1 };
-      const ahead = new Ahead(path.resolve(ctx.root, String(ctx.flags.prepared ?? '.lynkeus/prepared')));
-      ahead.clear();
-      const limit = Math.max(1, Number(ctx.flags.ahead ?? 4));
-      const idle = Number(ctx.flags.idle ?? 0.25);
-      let next = 0;
-      let made = 0;
-      let skipped = 0;
-      const worker = async () => {
-        const fixtures = new Fixtures(declared, home);
-        await fixtures.ahead();
-        try {
-          for (let c = cases[next++]; c; c = cases[next++]) {
-            // Far enough ahead, or the machine busy: a setup made then only takes the CPU from the cases
-            // running now, and the suite gains nothing from having it early.
-            while (!ahead.started(c) && (ahead.waiting() >= limit || (await idleShare()) < idle));
-            if (ahead.started(c)) {
-              skipped++;
-              continue;
-            }
-            const done = c;
-            await runCase(done, { base: ctx, config, fixtures, setupOnly: { keep: (p) => ahead.keep(done, p) } });
-            made++;
-          }
-        } finally {
-          fixtures.close();
-        }
-      };
-      await Promise.all(Array.from({ length: Math.max(1, Number(ctx.flags.jobs ?? 2)) }, worker));
+      const store = new Ahead(path.resolve(ctx.root, String(ctx.flags.prepared ?? '.lynkeus/prepared')));
+      store.clear();
+      const { made, skipped } = await prepareAhead(cases, {
+        base: ctx,
+        config,
+        store,
+        open: () => new Fixtures(declared, home),
+        limit: Math.max(1, Number(ctx.flags.ahead ?? 4)),
+        idle: Number(ctx.flags.idle ?? 0.25),
+        jobs: Number(ctx.flags.jobs ?? 1),
+      });
       return { text: `${made} setups made ahead, ${skipped} cases had started first`, json: { made, skipped } };
     },
   }),
