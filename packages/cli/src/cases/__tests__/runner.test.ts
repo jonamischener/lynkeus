@@ -134,7 +134,7 @@ test('with continue, the steps after a failed one still run; a failed setup stil
   );
 });
 
-test('a run that asks for routes gets every screen the app went through after the case began', async () => {
+test('a run that asks for routes gets the screens the case went through, not the one the app was left on', async () => {
   const c = parseCase('---\nid: walk\n---\nsteps:\n  - app.press: "#refresh"\n', 'walk.md');
   const { base } = fakeApp();
   const device = await base.device();
@@ -147,14 +147,15 @@ test('a run that asks for routes gets every screen the app went through after th
         since === undefined
           ? []
           : [
+              // The reset of an app left on Profile.Main reports it once more before the case moves on.
               { seq: 8, t: 0, kind: 'route', route: 'Profile.Main', path: [] },
               { seq: 9, t: 0, kind: 'route', route: 'Home.Main', path: [] },
-              { seq: 10, t: 0, kind: 'route', route: 'Profile.Main', path: [] },
+              { seq: 10, t: 0, kind: 'route', route: 'Settings.Main', path: [] },
             ],
     };
   };
   const report = await runCase(c, { base, config, fixtures, routes: true });
-  assert.deepEqual(report.routes, ['Home.Main', 'Profile.Main']);
+  assert.deepEqual(report.routes, ['Home.Main', 'Settings.Main']);
   assert.equal(asked.at(-1), 7);
 });
 

@@ -740,6 +740,8 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
   let setupFailed = false;
   let unsupported = false;
   let routesFrom: number | undefined;
+  // The screen a reused app was left on: a reset reports it once more before the case's own screens.
+  let routesStale: string | undefined;
   if (options.prepared) {
     steps.push(...options.prepared.steps);
     log(`  ⚡ setup made ahead (${options.prepared.steps.length} steps)`);
@@ -760,11 +762,17 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     }
     const t0 = Date.now();
     // Where the app's trace stood before the case first touched it: the screens after it are the case's.
-    if (options.routes && routesFrom === undefined && (step.verb.startsWith('app.') || config.macros?.[step.verb]))
-      routesFrom = await device()
-        .then((d) => d.trace())
-        .then((t) => t.last)
-        .catch(() => undefined);
+    if (options.routes && routesFrom === undefined && (step.verb.startsWith('app.') || config.macros?.[step.verb])) {
+      const d = await device().catch(() => undefined);
+      routesFrom = await d?.trace().then(
+        (t) => t.last,
+        () => undefined,
+      );
+      routesStale = await d?.screen().then(
+        (sc) => sc.route,
+        () => undefined,
+      );
+    }
     const at = step.verb.startsWith('app.') || config.macros?.[step.verb] ? await frameAt() : undefined;
     try {
       const outcome = await perform(step);
@@ -809,7 +817,9 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       .then((d) => d.trace(routesFrom))
       .then((t) => t.events)
       .catch(() => []);
-    report.routes = [...new Set(events.flatMap((e) => (e.kind === 'route' && e.route ? [e.route] : [])))].sort();
+    const walked = events.flatMap((e) => (e.kind === 'route' && e.route ? [e.route] : []));
+    while (walked.length > 0 && walked[0] === routesStale) walked.shift();
+    report.routes = [...new Set(walked)].sort();
   }
   if (filming) {
     await (await device()).command('record', { stop: true }).catch(() => undefined);
