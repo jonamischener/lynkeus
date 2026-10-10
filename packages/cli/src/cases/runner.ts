@@ -711,7 +711,13 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
             () => false,
           )
         : (await execute(['screenshot', file], base)).code === 0;
-      if (taken && fs.existsSync(file)) report.screenshot = file;
+      if (taken && fs.existsSync(file)) {
+        report.screenshot = file;
+        // What each pixel shows: comparing two runs' frames needs to tell the data they were given (a name,
+        // a balance) from how it was drawn.
+        const screen = await d.screen().catch(() => undefined);
+        if (screen) fs.writeFileSync(file.replace(/\.png$/, '.json'), JSON.stringify(screen));
+      }
     }
   };
 
