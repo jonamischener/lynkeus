@@ -176,6 +176,8 @@ export const caseCommands = [
     flags: {
       host: { type: 'boolean', help: 'start `headless start` for the run and stop it after' },
       once: { type: 'boolean', help: 'no second chance for a case that fails' },
+      continue: { type: 'boolean', help: "keep running a case's steps after one fails (a failed setup still stops it)" },
+      seen: { type: 'string', help: 'write <dir>/<case id>.json with the screens each passing case went through, for a coverage map', value: 'dir' },
       report: { type: 'string', help: 'append one JSON line per case', value: 'file' },
       events: { type: 'string', help: 'keep what the app told its analytics, per case, as <dir>/<case id>/events.jsonl', value: 'dir' },
       out: { type: 'string', help: 'write the run as a directory a report can read: run.json and cases.jsonl, a line per attempt', value: 'dir' },
@@ -205,6 +207,7 @@ export const caseCommands = [
       if (typeof files === 'string') return { text: files, code: 1 };
       const cases = files.flatMap(readCases);
       const dry = !!ctx.flags['dry-run'];
+      const seenDir = typeof ctx.flags.seen === 'string' && !dry ? path.resolve(ctx.flags.seen) : undefined;
       const out = typeof ctx.flags.out === 'string' && !dry ? new RunFile(path.resolve(ctx.flags.out), ctx.root) : undefined;
       if ((ctx.flags.screenshots || ctx.flags.video) && !out)
         return { text: '--screenshots and --video keep what they take in the run directory: add --out <dir>', code: 2 };
@@ -285,7 +288,22 @@ export const caseCommands = [
                   // A host just started is still drawing its first screens; with the setup made ahead nothing
                   // else gives it that moment before the first press.
                   if (host) await (await scoped.base.device()).idle({ quietMs: 300, timeoutMs: 5000 }).catch(() => undefined);
-                  const report = await runCase(c, { base: scoped.base, config, fixtures: own, dry, events, evidence: evidenceOf(c.id, n), log, prepared });
+                  const report = await runCase(c, {
+                    base: scoped.base,
+                    config,
+                    fixtures: own,
+                    dry,
+                    events,
+                    evidence: evidenceOf(c.id, n),
+                    log,
+                    prepared,
+                    continue: !!ctx.flags.continue,
+                    routes: seenDir ? (host ? 'fresh' : true) : false,
+                  });
+                  if (seenDir && report.result === 'passed' && report.routes?.length) {
+                    fs.mkdirSync(seenDir, { recursive: true });
+                    fs.writeFileSync(path.join(seenDir, `${c.id}.json`), `${JSON.stringify({ id: c.id, routes: report.routes }, null, 2)}\n`);
+                  }
                   return { report, startedAt, hello: (await scoped.base.device().catch(() => undefined))?.server.hello ?? undefined };
                 } finally {
                   if (host) await stopHost(host);
