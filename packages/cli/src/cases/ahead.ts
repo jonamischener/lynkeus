@@ -19,7 +19,43 @@ const MAX_AGE_MS = 15 * 60_000;
 
 type Kept = { setup: string; at: number; prepared: Prepared };
 
-export class Ahead {
+/** Where setups made ahead wait for their cases: files for a preparer in another process, memory in the same one. */
+export type Store = {
+  start(c: Case): void;
+  started(c: Case): boolean;
+  keep(c: Case, prepared: Prepared): void;
+  take(c: Case): Prepared | undefined;
+  waiting(): number;
+};
+
+export class InMemory implements Store {
+  readonly #started = new Set<string>();
+  readonly #kept = new Map<string, Prepared>();
+
+  start(c: Case): void {
+    this.#started.add(c.id);
+  }
+
+  started(c: Case): boolean {
+    return this.#started.has(c.id);
+  }
+
+  keep(c: Case, prepared: Prepared): void {
+    if (!this.started(c)) this.#kept.set(c.id, prepared);
+  }
+
+  take(c: Case): Prepared | undefined {
+    const prepared = this.#kept.get(c.id);
+    this.#kept.delete(c.id);
+    return prepared;
+  }
+
+  waiting(): number {
+    return this.#kept.size;
+  }
+}
+
+export class Ahead implements Store {
   constructor(private readonly dir: string) {}
 
   #file(c: Case, suffix = '.json') {

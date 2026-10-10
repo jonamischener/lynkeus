@@ -404,7 +404,12 @@ steps:
   await runCase(c, { base, config, fixtures, setupOnly: { keep: (p) => (kept = p) } });
   assert.ok(kept);
   const asked: string[] = [];
-  const counting = { call: async (name: string, params: Record<string, unknown>) => (asked.push(name), fixtures.call(name, params)) } as Fixtures;
+  const counting = {
+    call: async (name: string, params: Record<string, unknown>) => {
+      asked.push(name);
+      return fixtures.call(name, params);
+    },
+  } as Fixtures;
   const report = await runCase(c, { base, config, fixtures: counting, prepared: kept });
   assert.equal(report.result, 'passed', report.steps.map((s) => s.error).join(' '));
   assert.deepEqual(asked, ['inspect', 'inspect']);
