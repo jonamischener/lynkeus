@@ -91,8 +91,8 @@ export type RunOptions = {
   setupOnly?: { keep: (prepared: Prepared) => void };
   /** Keep running a case's steps after one fails, to see everything that is wrong in one pass. */
   continue?: boolean;
-  /** Collect the screens the app went through, for a coverage map. */
-  routes?: boolean;
+  /** Collect the screens the app went through, for a coverage map. `fresh`: the app was started for this case. */
+  routes?: boolean | 'fresh';
 };
 
 /** What a case's setup leaves for its steps: the aliases and what they answered, and what ran. */
@@ -768,10 +768,12 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
         (t) => t.last,
         () => undefined,
       );
-      routesStale = await d?.screen().then(
-        (sc) => sc.route,
-        () => undefined,
-      );
+      // An app started for this case begins where it begins; one reused from a case before was left elsewhere.
+      if (options.routes !== 'fresh')
+        routesStale = await d?.screen().then(
+          (sc) => sc.route,
+          () => undefined,
+        );
     }
     const at = step.verb.startsWith('app.') || config.macros?.[step.verb] ? await frameAt() : undefined;
     try {

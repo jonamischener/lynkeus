@@ -298,7 +298,7 @@ export const caseCommands = [
                     log,
                     prepared,
                     continue: !!ctx.flags.continue,
-                    routes: !!seenDir,
+                    routes: seenDir ? (host ? 'fresh' : true) : false,
                   });
                   if (seenDir && report.result === 'passed' && report.routes?.length) {
                     fs.mkdirSync(seenDir, { recursive: true });
