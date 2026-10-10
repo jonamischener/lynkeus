@@ -697,6 +697,9 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       if (sent.length > 0) report.sent = sent;
     }
     if (evidence?.screenshots) {
+      // A step may end mid-transition (a screen fading in, the splash fading out): the frame is of where the
+      // step left the app, so two runs' frames of the same step show the same screen.
+      await d.idle({ quietMs: 300, timeoutMs: 3000 }).catch(() => undefined);
       const file = path.join(
         evidence.dir,
         `${String(index).padStart(2, '0')}-${report.step
