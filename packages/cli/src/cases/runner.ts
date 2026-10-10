@@ -697,6 +697,14 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       if (sent.length > 0) report.sent = sent;
     }
     if (evidence?.screenshots) {
+      // A step may end mid-transition (a screen fading in, the splash fading out): the frame is of where the
+      // step left the app, so two runs' frames of the same step show the same screen.
+      // Long enough for what arrives after a short delay; a screen that never settles (an animation that
+      // keeps going) is noted as such, and its frame is of a moment, not of a state.
+      const settled = await d.idle({ quietMs: 700, timeoutMs: 3000 }).then(
+        (r) => r.idle,
+        () => false,
+      );
       const file = path.join(
         evidence.dir,
         `${String(index).padStart(2, '0')}-${report.step
@@ -711,7 +719,13 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
             () => false,
           )
         : (await execute(['screenshot', file], base)).code === 0;
-      if (taken && fs.existsSync(file)) report.screenshot = file;
+      if (taken && fs.existsSync(file)) {
+        report.screenshot = file;
+        // What each pixel shows: comparing two runs' frames needs to tell the data they were given (a name,
+        // a balance) from how it was drawn.
+        const screen = await d.screen().catch(() => undefined);
+        if (screen) fs.writeFileSync(file.replace(/\.png$/, '.json'), JSON.stringify({ ...screen, settled }));
+      }
     }
   };
 
