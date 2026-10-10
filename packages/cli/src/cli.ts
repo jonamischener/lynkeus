@@ -38,7 +38,8 @@ const globals = (argv: string[]) => {
 
 export type Session = { ctx: Base; stop: () => Promise<void> };
 
-const contextFor = (argv: string[], attached = false, port?: number): Session => {
+// `ownHost`: the port belongs to a host this run started for a case; whatever dials in is the device.
+const contextFor = (argv: string[], attached = false, port?: number, ownHost = false): Session => {
   const g = globals(argv);
   const root = path.resolve((g.root as string | undefined) ?? process.cwd());
   const config = loadConfig(root);
@@ -51,7 +52,9 @@ const contextFor = (argv: string[], attached = false, port?: number): Session =>
     const started = performance.now();
     const attachedIn = (d: Device) => err(`attached in ${Math.round(performance.now() - started)}ms (${d.info.name})`);
     const server = new AgentServer({ token: process.env.LYNKEUS_TOKEN, port: port ?? portFromEnv(config) });
-    const picking = pickAgentDevice((g.device as string | undefined) ?? process.env.LYNKEUS_DEVICE ?? config.device);
+    // A host started for the case is the device: looking for the configured simulator would only replace a
+    // late app's error with one about a simulator nobody asked for.
+    const picking = ownHost ? Promise.resolve(HEADLESS_HOST) : pickAgentDevice((g.device as string | undefined) ?? process.env.LYNKEUS_DEVICE ?? config.device);
     if (g.launch && appId) {
       const d = new Device(await picking, { appId, server });
       await d.launchApp(appId, { fresh: true });
@@ -74,7 +77,7 @@ const contextFor = (argv: string[], attached = false, port?: number): Session =>
       name: headless ? HEADLESS_HOST.name : String(hello.app?.name ?? hello.platform),
       platform: hello.platform === 'android' ? ('android' as const) : ('ios' as const),
     };
-    const d = new Device(info, { appId: appId ?? null, server, resolving: headless ? undefined : picking });
+    const d = new Device(info, { appId: appId ?? null, server, resolving: headless || ownHost ? undefined : picking });
     attachedIn(d);
     return d;
   };
@@ -94,7 +97,7 @@ const contextFor = (argv: string[], attached = false, port?: number): Session =>
       return device;
     },
     forPort: (other) => {
-      const scoped = contextFor(argv, attached, other);
+      const scoped = contextFor(argv, attached, other, true);
       return { base: scoped.ctx, stop: scoped.stop };
     },
   };

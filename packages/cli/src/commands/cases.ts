@@ -287,7 +287,11 @@ export const caseCommands = [
                 try {
                   // A host just started is still drawing its first screens; with the setup made ahead nothing
                   // else gives it that moment before the first press.
-                  if (host) await (await scoped.base.device()).idle({ quietMs: 300, timeoutMs: 5000 }).catch(() => undefined);
+                  if (host)
+                    await scoped.base
+                      .device()
+                      .then((d) => d.idle({ quietMs: 300, timeoutMs: 5000 }))
+                      .catch(() => undefined);
                   const report = await runCase(c, {
                     base: scoped.base,
                     config,
