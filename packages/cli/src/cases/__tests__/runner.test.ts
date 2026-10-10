@@ -115,6 +115,49 @@ test('the first step that fails stops the case and leaves the evidence', async (
   assert.equal(calls.filter((x) => x.method === 'press').length, 0);
 });
 
+test('with continue, the steps after a failed one still run; a failed setup still stops the case', async () => {
+  const red = parseCase('---\nid: red\n---\nsteps:\n  - app.see: { text: "Goodbye", timeoutMs: 200 }\n  - app.press: "#refresh"\n', 'red.md');
+  const { base, calls } = fakeApp();
+  const report = await runCase(red, { base, config, fixtures, continue: true });
+  assert.equal(report.result, 'failed');
+  assert.deepEqual(
+    report.steps.map((s) => s.status),
+    ['failed', 'passed'],
+  );
+  assert.equal(calls.filter((x) => x.method === 'press').length, 1);
+
+  const broken = parseCase('---\nid: broken\n---\nsetup:\n  - no_such_fixture: {}\nsteps:\n  - app.press: "#refresh"\n', 'broken.md');
+  const stopped = await runCase(broken, { base, config, fixtures, continue: true });
+  assert.deepEqual(
+    stopped.steps.map((s) => s.status),
+    ['failed', 'skipped'],
+  );
+});
+
+test('a run that asks for routes gets every screen the app went through after the case began', async () => {
+  const c = parseCase('---\nid: walk\n---\nsteps:\n  - app.press: "#refresh"\n', 'walk.md');
+  const { base } = fakeApp();
+  const device = await base.device();
+  const asked: (number | undefined)[] = [];
+  device.trace = async (since?: number) => {
+    asked.push(since);
+    return {
+      last: 7,
+      events:
+        since === undefined
+          ? []
+          : [
+              { seq: 8, t: 0, kind: 'route', route: 'Profile.Main', path: [] },
+              { seq: 9, t: 0, kind: 'route', route: 'Home.Main', path: [] },
+              { seq: 10, t: 0, kind: 'route', route: 'Profile.Main', path: [] },
+            ],
+    };
+  };
+  const report = await runCase(c, { base, config, fixtures, routes: true });
+  assert.deepEqual(report.routes, ['Home.Main', 'Profile.Main']);
+  assert.equal(asked.at(-1), 7);
+});
+
 test('an optional press of something that is not there is skipped, not failed', async () => {
   const c = parseCase('---\nid: opt\n---\nsteps:\n  - app.press: { target: "#dismiss", optional: true }\n', 'opt.md');
   const { base } = fakeApp();

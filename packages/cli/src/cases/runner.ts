@@ -68,6 +68,8 @@ export type CaseReport = {
   events?: RunEvent[];
   /** The case's film, an absolute path, where the host films. */
   video?: string;
+  /** Every screen the app went through while the case ran, when the run asked for them (`routes`). */
+  routes?: string[];
   /** Why it failed, read as rules from the screen, the requests and the trace (`lynkeus why`). */
   diagnosis?: string[];
 };
@@ -87,6 +89,10 @@ export type RunOptions = {
   prepared?: Prepared;
   /** Run only the setup and hand what it left to `keep`, for a case that will run later. */
   setupOnly?: { keep: (prepared: Prepared) => void };
+  /** Keep running a case's steps after one fails, to see everything that is wrong in one pass. */
+  continue?: boolean;
+  /** Collect the screens the app went through, for a coverage map. */
+  routes?: boolean;
 };
 
 /** What a case's setup leaves for its steps: the aliases and what they answered, and what ran. */
@@ -730,15 +736,19 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
   };
 
   let failed = false;
+  // A setup that failed leaves the steps nothing to stand on, with or without `continue`.
+  let setupFailed = false;
   let unsupported = false;
+  let routesFrom: number | undefined;
   if (options.prepared) {
     steps.push(...options.prepared.steps);
     log(`  ⚡ setup made ahead (${options.prepared.steps.length} steps)`);
   }
   const todo = options.setupOnly ? c.setup : options.prepared ? c.steps : [...c.setup, ...c.steps];
-  for (const step of todo) {
+  const setupLength = todo === c.steps ? 0 : c.setup.length;
+  for (const [index, step] of todo.entries()) {
     const text = label(step);
-    if (failed || unsupported) {
+    if (unsupported || setupFailed || (failed && !options.continue)) {
       steps.push({ step: text, status: 'skipped', ms: 0 });
       continue;
     }
@@ -749,6 +759,12 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       continue;
     }
     const t0 = Date.now();
+    // Where the app's trace stood before the case first touched it: the screens after it are the case's.
+    if (options.routes && routesFrom === undefined && (step.verb.startsWith('app.') || config.macros?.[step.verb]))
+      routesFrom = await device()
+        .then((d) => d.trace())
+        .then((t) => t.last)
+        .catch(() => undefined);
     const at = step.verb.startsWith('app.') || config.macros?.[step.verb] ? await frameAt() : undefined;
     try {
       const outcome = await perform(step);
@@ -769,6 +785,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
         continue;
       }
       failed = true;
+      if (index < setupLength) setupFailed = true;
       const broke: StepReport = { step: text, status: 'failed', ms: Date.now() - t0, error: message };
       steps.push(broke);
       log(`  ❌ ${text}  — ${message.split('\n')[0]}  (${Date.now() - t0}ms)`);
@@ -787,6 +804,13 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
     steps,
   };
   if (options.events) report.events = recorded;
+  if (routesFrom !== undefined) {
+    const events = await device()
+      .then((d) => d.trace(routesFrom))
+      .then((t) => t.events)
+      .catch(() => []);
+    report.routes = [...new Set(events.flatMap((e) => (e.kind === 'route' && e.route ? [e.route] : [])))].sort();
+  }
   if (filming) {
     await (await device()).command('record', { stop: true }).catch(() => undefined);
     if (film && fs.existsSync(film)) report.video = film;
