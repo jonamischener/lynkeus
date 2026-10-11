@@ -19,9 +19,22 @@ import { isRoute, parseTarget, scopedTarget } from '../targets.js';
 import type { Fixtures, FixturesConfig } from './fixtures.js';
 import { type Case, dig, interpolate, matcherOf, matches, type Scope, type Step, stepOf, type StepValue } from './format.js';
 
+export type NativeMock = {
+  result?: unknown;
+  screen?: { title?: string; subtitle?: string; image?: string; buttons?: Record<string, unknown> };
+};
+
 export type CasesConfig = {
   /** The folder of the file that declared this, set when the configuration is read. */
   base?: string;
+  /**
+   * What native SDKs a headless host cannot run answer, keyed `Module.method` (the native module's name, as
+   * `NativeModules` has it): `result` is what the call resolves with; `screen` puts up a stand-in page with a
+   * `title`, an optional `subtitle` and `image` (a URI), and `buttons`, label to result, each pressable as
+   * `#native-mock-<label>`. Sent to the app at the start of every case; a step changes it with
+   * `app.call: { command: nativeMocks, params: { set: { … } } }`, and `null` takes a key's mock away.
+   */
+  nativeMocks?: Record<string, NativeMock | null>;
   /** Where cases live (default `cases`). */
   dir?: string;
   /** Where the flows a case runs live (default `flows`). */
@@ -745,6 +758,11 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
   if (options.prepared) {
     steps.push(...options.prepared.steps);
     log(`  ⚡ setup made ahead (${options.prepared.steps.length} steps)`);
+  }
+  // What native SDKs answer in this case starts as the config says, whatever the last case on this app set.
+  if (config.nativeMocks && !options.setupOnly && !options.dry) {
+    const d = await device().catch(() => undefined);
+    await d?.command('nativeMocks', { replace: config.nativeMocks }).catch(() => undefined);
   }
   const todo = options.setupOnly ? c.setup : options.prepared ? c.steps : [...c.setup, ...c.steps];
   const setupLength = todo === c.steps ? 0 : c.setup.length;
