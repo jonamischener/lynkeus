@@ -372,7 +372,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
    * stops changing; then back up in short pulls (at the top of a sheet a short
    * pull springs back, where a long one would drag the sheet shut).
    */
-  const scrollTo = async (there: () => Promise<boolean>): Promise<boolean> => {
+  const scrollTo = async (there: () => Promise<boolean>, upward = false): Promise<boolean> => {
     const d = await device();
     if (!d.server.hello?.native) return false;
     const { w, h } = (await d.screen()).window;
@@ -390,7 +390,7 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       }
       return there();
     };
-    if (await pull(Math.round(h * 0.75), Math.round(h * 0.3), 12)) return true;
+    if (!upward && (await pull(Math.round(h * 0.75), Math.round(h * 0.3), 12))) return true;
     const middle = Math.round(h * 0.5);
     return pull(middle, middle + 110, 30);
   };
@@ -466,6 +466,20 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
       await d.waitFor({ target, timeoutMs: 500 }).catch(() => undefined);
       if (!(await listed())) await scrollTo(listed);
     }
+    // Listed, but scrolled out of the window, cut by its edge or under the header or tab bar (a page left
+    // further down than the control): towards it, until it is clear.
+    const outside = async (): Promise<'above' | 'below' | undefined> => {
+      const found = (await d.server.call('find', target)) as Element | null;
+      if (!found) return undefined;
+      const { h } = (await d.screen()).window;
+      // Covered near an edge is the screen's own header or tab bar over a scrolled page, not an overlay.
+      const top = found.frame.y, bottom = found.frame.y + found.frame.h;
+      if (top < 0 || (found.covered && top < h * 0.2)) return 'above';
+      if (bottom > h || (found.covered && bottom > h * 0.8)) return 'below';
+      return undefined;
+    };
+    const side = await outside();
+    if (side) await scrollTo(async () => (await outside()) === undefined, side === 'above');
     // The control may still be disabled while what it depends on loads. The waits go through the app,
     // so a host with its own clock moves it on instead of standing still while this one sleeps.
     const deadline = Date.now() + (typeof params.timeoutMs === 'number' ? params.timeoutMs : 3000);
