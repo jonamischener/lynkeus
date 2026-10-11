@@ -732,9 +732,14 @@ export const runCase = async (c: Case, options: RunOptions): Promise<CaseReport>
           .slice(0, 48)
           .replace(/^-|-$/g, '')}.png`,
       );
+      // A host on another machine writes the file there; `inline` asks it for the picture as well.
       const taken = (await offers('screenshot'))
-        ? await d.command('screenshot', { path: file }).then(
-            () => true,
+        ? await d.command('screenshot', { path: file, inline: true }).then(
+            (answer) => {
+              const png = (answer as { png?: unknown } | undefined)?.png;
+              if (typeof png === 'string' && !fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(png, 'base64'));
+              return true;
+            },
             () => false,
           )
         : (await execute(['screenshot', file], base)).code === 0;
